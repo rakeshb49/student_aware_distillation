@@ -1,0 +1,48 @@
+{
+  "teacher_model": "huihui-ai/Huihui-MoE-1B-A0.6B",
+  "student_model": "HuggingFaceTB/SmolLM-135M",
+  "num_experts": 8,
+  "top_k": 2,
+  
+  "batch_size": 4,
+  "gradient_accumulation_steps": 8,
+  "learning_rate": 5e-5,
+  "router_lr": 1e-4,
+  "num_epochs": 3,
+  "warmup_steps": 500,
+  "eval_steps": 500,
+  "save_epochs": 1,
+  "max_length": 512,
+  
+  "alpha_kd": 0.7,
+  "alpha_feature": 0.1,
+  "alpha_attention": 0.1,
+  "alpha_layerwise": 0.05,
+  "alpha_contrastive": 0.05,
+  
+  "temperature": 4.0,
+  "contrastive_temp": 0.07,
+  
+  "initial_top_k": 1,
+  "final_top_k": 4,
+  "load_balance_weight": 0.01,
+  "noise_std": 0.1,
+  
+  "weight_decay": 0.01,
+  "max_grad_norm": 1.0,
+  "scheduler_type": "cosine",
+  "use_amp": true,
+  
+  "dataset_subset_size": 50000,
+  "num_workers": 2,
+  "use_dynamic_batching": true,
+  
+  "checkpoint_dir": "./checkpoints",
+  "log_dir": "./logs",
+  "cache_dir": "./cache",
+  
+  "memory_threshold": 0.85,
+  
+  "use_wandb": false,
+  "project_name": "student-aware-distillation"
+}
