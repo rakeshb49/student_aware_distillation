@@ -196,6 +196,47 @@ def test_framework_initialization_minimal():
         print(f"❌ Framework initialization test failed: {e}")
         return False
 
+def test_contrastive_loss_dimensions():
+    """Test contrastive loss with mismatched embedding dimensions"""
+    print("\nTesting contrastive loss dimension alignment...")
+
+    try:
+        from models.distillation_framework import ContrastiveDistillationLoss
+
+        # Test parameters matching the error
+        batch_size = 4
+        student_dim = 576
+        teacher_dim = 1024
+        temperature = 0.07
+
+        print(f"Student embeddings: [{batch_size}, {student_dim}]")
+        print(f"Teacher embeddings: [{batch_size}, {teacher_dim}]")
+
+        # Create test embeddings with different dimensions
+        student_embeddings = torch.randn(batch_size, student_dim)
+        teacher_embeddings = torch.randn(batch_size, teacher_dim)
+
+        # Test contrastive loss with dimension alignment
+        contrastive_loss = ContrastiveDistillationLoss(
+            temperature=temperature,
+            student_dim=student_dim,
+            teacher_dim=teacher_dim
+        )
+
+        # This was the failing line: computing similarity between different dimensions
+        loss = contrastive_loss(student_embeddings, teacher_embeddings)
+
+        print(f"Contrastive loss: {loss.item():.6f}")
+        print("✅ Contrastive loss dimension alignment working!")
+
+        return True
+
+    except Exception as e:
+        print(f"❌ Contrastive loss test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def main():
     """Run critical component tests"""
     print("="*70)
@@ -207,7 +248,8 @@ def main():
         ("Vocabulary KL Divergence Fix", test_vocab_kl_divergence),
         ("Router Tensor Concatenation Fix", test_router_tensor_concat),
         ("Model Config Compatibility", test_model_config_compatibility),
-        ("Framework Component Initialization", test_framework_initialization_minimal)
+        ("Framework Component Initialization", test_framework_initialization_minimal),
+        ("Contrastive Loss Dimension Fix", test_contrastive_loss_dimensions)
     ]
 
     passed = 0

@@ -237,9 +237,16 @@ class LayerwiseDistillationLoss(nn.Module):
 class ContrastiveDistillationLoss(nn.Module):
     """Contrastive loss for better representation learning"""
 
-    def __init__(self, temperature: float = 0.07):
+    def __init__(self, temperature: float = 0.07, student_dim: int = None, teacher_dim: int = None):
         super().__init__()
         self.temperature = temperature
+
+        # Add projection layer if dimensions don't match
+        if student_dim is not None and teacher_dim is not None and student_dim != teacher_dim:
+            self.needs_projection = True
+            self.teacher_projector = nn.Linear(teacher_dim, student_dim)
+        else:
+            self.needs_projection = False
 
     def forward(self,
                 student_embeddings: torch.Tensor,
@@ -254,6 +261,10 @@ class ContrastiveDistillationLoss(nn.Module):
         Returns:
             contrastive_loss: Scalar tensor
         """
+        # Project teacher embeddings to student space if needed
+        if self.needs_projection:
+            teacher_embeddings = self.teacher_projector(teacher_embeddings)
+
         # Normalize embeddings
         student_norm = F.normalize(student_embeddings, p=2, dim=-1)
         teacher_norm = F.normalize(teacher_embeddings, p=2, dim=-1)
@@ -318,7 +329,9 @@ class StudentAwareDistillationFramework(nn.Module):
         )
 
         self.contrastive_loss = ContrastiveDistillationLoss(
-            temperature=config.get('contrastive_temp', 0.07)
+            temperature=config.get('contrastive_temp', 0.07),
+            student_dim=self.student_dim,
+            teacher_dim=self.teacher_dim
         )
 
         # Loss weights
