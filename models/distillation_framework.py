@@ -490,8 +490,16 @@ class StudentAwareDistillationFramework(nn.Module):
         # Handle vocabulary size mismatch
         aligned_teacher_logits = self.vocab_aligner.align_teacher_logits(teacher_logits)
 
-        student_log_probs = F.log_softmax(student_logits / self.temperature, dim=-1)
-        teacher_probs = F.softmax(aligned_teacher_logits / self.temperature, dim=-1)
+        # Clamp logits for stability, especially with mixed precision
+        student_logits_clamped = torch.clamp(student_logits, min=-10.0, max=10.0)
+        teacher_logits_clamped = torch.clamp(aligned_teacher_logits, min=-10.0, max=10.0)
+
+        student_log_probs = F.log_softmax(student_logits_clamped / self.temperature, dim=-1)
+        teacher_probs = F.softmax(teacher_logits_clamped / self.temperature, dim=-1)
+
+        # Ensure teacher_probs don't have NaNs from softmax
+        teacher_probs = torch.nan_to_num(teacher_probs, nan=0.0)
+
         kd_loss = self.kd_loss(student_log_probs, teacher_probs) * (self.temperature ** 2)
         losses['kd_loss'] = kd_loss * self.alpha_kd
 

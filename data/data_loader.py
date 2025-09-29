@@ -55,17 +55,10 @@ class DistillationDataset(Dataset):
                     ds = load_dataset("wikitext", "wikitext-103-raw-v1",
                                      split="train", cache_dir=self.cache_dir)
                 elif dataset_name == "c4":
-                    # C4 is large, load a subset
-                    ds = load_dataset("c4", "en", split="train",
-                                     streaming=True, cache_dir=self.cache_dir)
-                    # Convert streaming dataset to regular dataset with limit
-                    ds = ds.take(subset_size if subset_size else 10000)
-                    ds = Dataset.from_generator(lambda: ds)
-                elif dataset_name == "openwebtext":
-                    ds = load_dataset("Skylion007/openwebtext", split="train",
-                                     cache_dir=self.cache_dir, trust_remote_code=True)
+                    # C4 is large, only load if explicitly requested and not in recommended
+                    ds = load_dataset("c4", "en", split="train", cache_dir=self.cache_dir)
                 elif dataset_name == "bookcorpus":
-                    ds = load_dataset("bookcorpusopen", split="train",
+                    ds = load_dataset("bookcorpus", "plain_text", split="train",
                                      cache_dir=self.cache_dir)
                 elif dataset_name == "wikipedia":
                     ds = load_dataset("wikipedia", "20220301.en", split="train",
@@ -285,8 +278,9 @@ def get_recommended_datasets() -> List[str]:
     """Get recommended datasets for distillation"""
     return [
         "wikitext",      # High-quality Wikipedia text
-        "openwebtext",   # Web text similar to GPT training data
+        "bookcorpus",    # Large, clean text corpus
         # "c4",          # Large-scale web corpus (commented due to size)
+        # "openwebtext", # Replaced by bookcorpus due to instability
         # "wikipedia",   # Full Wikipedia (commented due to size)
     ]
 

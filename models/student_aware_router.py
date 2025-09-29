@@ -216,19 +216,15 @@ class AdaptiveExpertRouter(nn.Module):
         return routing_weights, aux_info
 
     def compute_load_balance_loss(self, routing_weights: torch.Tensor) -> torch.Tensor:
-        """Compute load balancing loss to ensure even expert utilization"""
+        """Compute load balancing loss to ensure even expert utilization (MSE version for stability)"""
         # Average routing weights across batch and sequence
         avg_routing = routing_weights.mean(dim=[0, 1])
 
         # Target uniform distribution
-        uniform_target = torch.ones_like(avg_routing) / self.num_experts
+        uniform_target = torch.full_like(avg_routing, 1.0 / self.num_experts)
 
-        # KL divergence from uniform
-        load_balance_loss = F.kl_div(
-            avg_routing.log() + 1e-8,
-            uniform_target,
-            reduction='batchmean'
-        )
+        # Use Mean Squared Error loss for numerical stability (avoids log)
+        load_balance_loss = F.mse_loss(avg_routing, uniform_target)
 
         return load_balance_loss * self.load_balance_weight
 
