@@ -60,7 +60,9 @@ class StudentCapacityEstimator(nn.Module):
 
         # Estimate current capacity
         capacity_scores = self.capacity_net(student_hidden)  # [B, L, num_experts]
+        capacity_scores = torch.nan_to_num(capacity_scores, nan=0.0, posinf=0.0, neginf=0.0)
         capacity_scores = F.softmax(capacity_scores / self.temperature, dim=-1)
+        capacity_scores = torch.nan_to_num(capacity_scores, nan=0.0, posinf=0.0, neginf=0.0)
 
         # Analyze knowledge gaps if teacher hidden states are available
         gap_scores = None
@@ -88,7 +90,9 @@ class StudentCapacityEstimator(nn.Module):
             combined = torch.cat([student_hidden, teacher_proj], dim=-1)
 
             gap_scores = self.gap_analyzer(combined)
+            gap_scores = torch.nan_to_num(gap_scores, nan=0.0, posinf=0.0, neginf=0.0)
             gap_scores = F.softmax(gap_scores, dim=-1)
+            gap_scores = torch.nan_to_num(gap_scores, nan=0.0, posinf=0.0, neginf=0.0)
 
         return {
             'capacity_scores': capacity_scores,
@@ -154,6 +158,7 @@ class AdaptiveExpertRouter(nn.Module):
 
         # Compute base routing scores
         routing_logits = self.routing_gate(student_hidden)
+        routing_logits = torch.nan_to_num(routing_logits, nan=0.0, posinf=0.0, neginf=0.0)
 
         # Add noise for exploration during training
         if training and self.noise_std > 0:
@@ -247,7 +252,8 @@ class AdaptiveExpertRouter(nn.Module):
 
         # Align expert outputs to student sequence length
         aligned_expert_outputs = []
-        for expert_output in teacher_expert_outputs:
+        for idx, expert_output in enumerate(teacher_expert_outputs):
+            expert_output = torch.nan_to_num(expert_output, nan=0.0, posinf=0.0, neginf=0.0)
             expert_batch, expert_seq, expert_dim = expert_output.shape
             if expert_seq != seq_len:
                 # Interpolate to match student sequence length
@@ -263,9 +269,11 @@ class AdaptiveExpertRouter(nn.Module):
 
         # Stack aligned expert outputs
         expert_stack = torch.stack(aligned_expert_outputs, dim=2)  # [B, L, E, D]
+        expert_stack = torch.nan_to_num(expert_stack, nan=0.0, posinf=0.0, neginf=0.0)
 
         # Use first aligned expert output as representative for routing
         representative_teacher = aligned_expert_outputs[0]
+        representative_teacher = torch.nan_to_num(representative_teacher, nan=0.0, posinf=0.0, neginf=0.0)
 
         # Compute routing weights
         routing_weights, aux_info = self.compute_routing_weights(
@@ -273,8 +281,10 @@ class AdaptiveExpertRouter(nn.Module):
         )
 
         # Apply routing weights
+        routing_weights = torch.nan_to_num(routing_weights, nan=0.0, posinf=0.0, neginf=0.0)
         routing_weights = routing_weights.unsqueeze(-1)  # [B, L, E, 1]
         routed_output = (expert_stack * routing_weights).sum(dim=2)  # [B, L, D]
+        routed_output = torch.nan_to_num(routed_output, nan=0.0, posinf=0.0, neginf=0.0)
 
         routing_info = {
             'routing_weights': routing_weights.squeeze(-1),

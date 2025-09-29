@@ -3,6 +3,7 @@ Core Distillation Framework for Student-Aware Knowledge Transfer
 Implements SOTA distillation techniques with novel enhancements
 """
 
+import contextlib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -346,6 +347,35 @@ class StudentAwareDistillationFramework(nn.Module):
         # Temperature for KD
         self.temperature = config.get('temperature', 4.0)
 
+        # Track which losses already emitted non-finite warnings
+        self._loss_warnings_printed = set()
+
+    def _sanitize_tensor(self, tensor: Optional[torch.Tensor], name: str,
+                          clamp_range: Optional[Tuple[float, float]] = None) -> Optional[torch.Tensor]:
+        if tensor is None:
+            return None
+
+        if clamp_range is not None:
+            tensor = torch.clamp(tensor, min=clamp_range[0], max=clamp_range[1])
+
+        if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+            if name not in self._loss_warnings_printed:
+                print(f"[Warning] Detected NaN/Inf values in {name}; applying nan_to_num.")
+                self._loss_warnings_printed.add(name)
+            tensor = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+        else:
+            tensor = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+
+        return tensor
+
+    def _ensure_finite_loss(self, name: str, value: torch.Tensor) -> torch.Tensor:
+        if torch.isnan(value) or torch.isinf(value):
+            if name not in self._loss_warnings_printed:
+                print(f"[Warning] {name} produced non-finite value ({value.item()}); clamping to zero.")
+                self._loss_warnings_printed.add(name)
+            return torch.zeros_like(value)
+        return value
+
     def _load_teacher_model(self):
         """Load and configure teacher model"""
         model_name = self.config.get('teacher_model', 'huihui-ai/Huihui-MoE-1B-A0.6B')
@@ -466,9 +496,30 @@ class StudentAwareDistillationFramework(nn.Module):
         # Get teacher outputs (no gradient)
         with torch.no_grad():
             teacher_outputs = self.get_teacher_outputs(input_ids, attention_mask)
-            teacher_logits = teacher_outputs['logits']
-            teacher_hidden = teacher_outputs['hidden_states']
-            teacher_attention = teacher_outputs['attentions']
+            teacher_logits = self._sanitize_tensor(
+                teacher_outputs['logits'].to(torch.float32),
+                'teacher_logits',
+                clamp_range=(-30.0, 30.0)
+            )
+            teacher_hidden = [
+                self._sanitize_tensor(h.to(torch.float32), f'teacher_hidden_{idx}')
+                for idx, h in enumerate(teacher_outputs['hidden_states'])
+            ]
+            teacher_hidden = [torch.nan_to_num(h, nan=0.0, posinf=0.0, neginf=0.0) for h in teacher_hidden]
+
+            teacher_attention = []
+            for idx, a in enumerate(teacher_outputs['attentions']):
+                if a is None:
+                    teacher_attention.append(None)
+                else:
+                    sanitized_attention = self._sanitize_tensor(a.to(torch.float32), f'teacher_attention_{idx}')
+                    teacher_attention.append(torch.nan_to_num(sanitized_attention, nan=0.0, posinf=0.0, neginf=0.0))
+
+            raw_teacher_experts = teacher_outputs.get('expert_outputs', [teacher_hidden[-1]])
+            teacher_experts = [
+                self._sanitize_tensor(exp.to(torch.float32), f'teacher_expert_{idx}')
+                for idx, exp in enumerate(raw_teacher_experts)
+            ]
 
         # Get student outputs (with gradient)
         student_outputs = self.student_model(
@@ -479,9 +530,25 @@ class StudentAwareDistillationFramework(nn.Module):
             return_dict=True
         )
 
-        student_logits = student_outputs.logits
-        student_hidden = student_outputs.hidden_states
-        student_attention = student_outputs.attentions
+        # Make sure student outputs are in float32 for stable loss computation
+        student_logits = self._sanitize_tensor(
+            student_outputs.logits.to(torch.float32),
+            'student_logits',
+            clamp_range=(-30.0, 30.0)
+        )
+        student_logits = torch.nan_to_num(student_logits, nan=0.0, posinf=0.0, neginf=0.0)
+        student_hidden = [
+            self._sanitize_tensor(h.to(torch.float32), f'student_hidden_{idx}')
+            for idx, h in enumerate(student_outputs.hidden_states)
+        ]
+        student_hidden = [torch.nan_to_num(h, nan=0.0, posinf=0.0, neginf=0.0) for h in student_hidden]
+        student_attention = []
+        for idx, a in enumerate(student_outputs.attentions):
+            if a is None:
+                student_attention.append(None)
+            else:
+                sanitized_attn = self._sanitize_tensor(a.to(torch.float32), f'student_attention_{idx}')
+                student_attention.append(torch.nan_to_num(sanitized_attn, nan=0.0, posinf=0.0, neginf=0.0))
 
         # Initialize losses dictionary
         losses = {}
@@ -507,7 +574,7 @@ class StudentAwareDistillationFramework(nn.Module):
         teacher_probs = teacher_probs / torch.clamp(teacher_probs.sum(dim=-1, keepdim=True), min=1e-8)
 
         kd_loss = self.kd_loss(student_log_probs, teacher_probs) * (self.temperature ** 2)
-        losses['kd_loss'] = kd_loss * self.alpha_kd
+        losses['kd_loss'] = self._ensure_finite_loss('kd_loss', kd_loss * self.alpha_kd)
 
         # 2. Student-aware routing and feature losses
         if len(student_hidden) > 0 and len(teacher_hidden) > 0:
@@ -515,7 +582,7 @@ class StudentAwareDistillationFramework(nn.Module):
             # Format teacher outputs for router compatibility
             teacher_outputs_formatted = {
                 'hidden_states': teacher_hidden[-1],  # Use last layer hidden states
-                'expert_outputs': teacher_outputs.get('expert_outputs', [teacher_hidden[-1]])
+                'expert_outputs': teacher_experts
             }
 
             routing_outputs = self.router(
@@ -526,7 +593,8 @@ class StudentAwareDistillationFramework(nn.Module):
 
             # Add routing losses
             for loss_name, loss_value in routing_outputs['losses'].items():
-                losses[f'routing_{loss_name}'] = loss_value * self.alpha_feature
+                scaled = self._ensure_finite_loss(f'routing_{loss_name}', loss_value * self.alpha_feature)
+                losses[f'routing_{loss_name}'] = scaled
 
         # 3. Attention transfer loss
         if student_attention and teacher_attention and self.alpha_attention > 0:
@@ -550,7 +618,8 @@ class StudentAwareDistillationFramework(nn.Module):
                     attn_losses.append(attn_loss)
 
             if attn_losses:
-                losses['attention_loss'] = torch.stack(attn_losses).mean() * self.alpha_attention
+                attn_mean = torch.stack(attn_losses).mean()
+                losses['attention_loss'] = self._ensure_finite_loss('attention_loss', attn_mean * self.alpha_attention)
 
         # 4. Layer-wise distillation loss
         if len(student_hidden) > 1 and len(teacher_hidden) > 1 and self.alpha_layerwise > 0:
@@ -558,7 +627,7 @@ class StudentAwareDistillationFramework(nn.Module):
                 list(student_hidden),
                 list(teacher_hidden)
             )
-            losses['layerwise_loss'] = layerwise_loss * self.alpha_layerwise
+            losses['layerwise_loss'] = self._ensure_finite_loss('layerwise_loss', layerwise_loss * self.alpha_layerwise)
 
         # 5. Contrastive loss (using CLS or mean pooling)
         if self.alpha_contrastive > 0:
@@ -567,15 +636,16 @@ class StudentAwareDistillationFramework(nn.Module):
             teacher_embed = teacher_hidden[-1].mean(dim=1)
 
             contrastive_loss = self.contrastive_loss(student_embed, teacher_embed)
-            losses['contrastive_loss'] = contrastive_loss * self.alpha_contrastive
+            losses['contrastive_loss'] = self._ensure_finite_loss('contrastive_loss', contrastive_loss * self.alpha_contrastive)
 
         # 6. Language modeling loss (if labels provided)
         if labels is not None:
             lm_loss = self._chunked_cross_entropy(student_logits, labels)
-            losses['lm_loss'] = lm_loss * (1 - self.alpha_kd)
+            losses['lm_loss'] = self._ensure_finite_loss('lm_loss', lm_loss * (1 - self.alpha_kd))
 
         # Compute total loss
         total_loss = sum(losses.values())
+        total_loss = self._ensure_finite_loss('total_loss', total_loss)
 
         return {
             'loss': total_loss,
