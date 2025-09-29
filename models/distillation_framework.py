@@ -468,9 +468,15 @@ class StudentAwareDistillationFramework(nn.Module):
         # 2. Student-aware routing and feature losses
         if len(student_hidden) > 0 and len(teacher_hidden) > 0:
             # Use last hidden state for routing
+            # Format teacher outputs for router compatibility
+            teacher_outputs_formatted = {
+                'hidden_states': teacher_hidden[-1],  # Use last layer hidden states
+                'expert_outputs': teacher_outputs.get('expert_outputs', [teacher_hidden[-1]])
+            }
+
             routing_outputs = self.router(
                 student_hidden[-1],
-                teacher_outputs,
+                teacher_outputs_formatted,
                 step=step
             )
 
