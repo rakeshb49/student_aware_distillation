@@ -38,6 +38,9 @@ def setup_environment():
     # Set environment variables for better performance
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
     os.environ['OMP_NUM_THREADS'] = '4'
+    os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+    os.environ.setdefault('TORCH_NCCL_DEBUG', 'WARN')
+    os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF_MAX_SPLIT_SIZE_MB', '64')
 
     # Check CUDA availability
     if torch.cuda.is_available():
@@ -49,6 +52,8 @@ def setup_environment():
         torch.cuda.empty_cache()
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     else:
         print("WARNING: CUDA not available, training will be slow on CPU")
 
@@ -95,6 +100,8 @@ def load_config(config_path: str = None) -> dict:
         'max_grad_norm': 1.0,
         'scheduler_type': 'cosine',
         'use_amp': True,
+        'loss_chunk_size': 128,
+        'attention_layers': 4,
 
         # Data configuration
         'dataset_subset_size': 50000,  # Limit dataset size for Kaggle

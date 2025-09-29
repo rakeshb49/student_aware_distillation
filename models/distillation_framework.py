@@ -288,6 +288,8 @@ class StudentAwareDistillationFramework(nn.Module):
     def __init__(self, config: Dict):
         super().__init__()
         self.config = config
+        self.loss_chunk_size = config.get('loss_chunk_size', None)
+        self.max_attention_layers = config.get('attention_layers', None)
 
         # Load teacher model (Huihui-MoE)
         self.teacher_model = self._load_teacher_model()
@@ -361,6 +363,9 @@ class StudentAwareDistillationFramework(nn.Module):
         for param in model.parameters():
             param.requires_grad = False
 
+        if hasattr(model.config, 'use_cache'):
+            model.config.use_cache = False
+
         return model
 
     def _load_student_model(self):
@@ -379,8 +384,7 @@ class StudentAwareDistillationFramework(nn.Module):
             attn_implementation="eager"  # Fix attention implementation warning
         )
 
-        # Disable cache to avoid unnecessary memory spikes during training
-        if hasattr(model.config, "use_cache"):
+        if hasattr(model.config, 'use_cache'):
             model.config.use_cache = False
 
         return model
@@ -400,6 +404,10 @@ class StudentAwareDistillationFramework(nn.Module):
         self.student_layers = getattr(student_config, 'num_hidden_layers', 30)
         self.student_heads = getattr(student_config, 'num_attention_heads', 9)
         self.student_vocab_size = getattr(student_config, 'vocab_size', 49152)
+
+        # Enable gradient checkpointing to trade compute for memory
+        if hasattr(self.student_model, 'gradient_checkpointing_enable'):
+            self.student_model.gradient_checkpointing_enable()
 
         # Initialize vocabulary aligner for handling vocab size mismatches
         self.vocab_aligner = VocabularyAligner(
@@ -511,11 +519,19 @@ class StudentAwareDistillationFramework(nn.Module):
             # Average attention transfer loss across layers
             attn_losses = []
             min_layers = min(len(student_attention), len(teacher_attention))
-            for i in range(min_layers):
-                if student_attention[i] is not None and teacher_attention[i] is not None:
+            layers_to_use = min_layers
+            if self.max_attention_layers:
+                layers_to_use = min(min_layers, self.max_attention_layers)
+
+            # Use most recent attention maps to maintain signal
+            student_attn_subset = student_attention[-layers_to_use:]
+            teacher_attn_subset = teacher_attention[-layers_to_use:]
+
+            for s_attn, t_attn in zip(student_attn_subset, teacher_attn_subset):
+                if s_attn is not None and t_attn is not None:
                     attn_loss = self.attention_transfer(
-                        student_attention[i],
-                        teacher_attention[i]
+                        s_attn,
+                        t_attn
                     )
                     attn_losses.append(attn_loss)
 
@@ -523,7 +539,7 @@ class StudentAwareDistillationFramework(nn.Module):
                 losses['attention_loss'] = torch.stack(attn_losses).mean() * self.alpha_attention
 
         # 4. Layer-wise distillation loss
-        if len(student_hidden) > 1 and len(teacher_hidden) > 1:
+        if len(student_hidden) > 1 and len(teacher_hidden) > 1 and self.alpha_layerwise > 0:
             layerwise_loss = self.layerwise_loss(
                 list(student_hidden),
                 list(teacher_hidden)
@@ -541,11 +557,7 @@ class StudentAwareDistillationFramework(nn.Module):
 
         # 6. Language modeling loss (if labels provided)
         if labels is not None:
-            lm_loss = F.cross_entropy(
-                student_logits.view(-1, student_logits.size(-1)),
-                labels.view(-1),
-                ignore_index=-100
-            )
+            lm_loss = self._chunked_cross_entropy(student_logits, labels)
             losses['lm_loss'] = lm_loss * (1 - self.alpha_kd)
 
         # Compute total loss
@@ -558,6 +570,41 @@ class StudentAwareDistillationFramework(nn.Module):
             'teacher_logits': teacher_logits,
             'routing_info': routing_outputs.get('routing_info', {}) if 'routing_outputs' in locals() else {}
         }
+
+    def _chunked_cross_entropy(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """Compute cross entropy in chunks to reduce activation memory footprint."""
+        vocab_size = logits.size(-1)
+        flat_logits = logits.view(-1, vocab_size)
+        flat_labels = labels.view(-1)
+
+        chunk_size = self.loss_chunk_size or flat_logits.size(0)
+
+        if chunk_size >= flat_logits.size(0):
+            return F.cross_entropy(
+                flat_logits,
+                flat_labels,
+                ignore_index=-100
+            )
+
+        total_loss = logits.new_zeros(())
+        total_weight = logits.new_zeros(())
+
+        for start in range(0, flat_logits.size(0), chunk_size):
+            end = min(start + chunk_size, flat_logits.size(0))
+            logits_chunk = flat_logits[start:end]
+            labels_chunk = flat_labels[start:end]
+
+            mask = labels_chunk != -100
+            if mask.any():
+                loss_chunk = F.cross_entropy(
+                    logits_chunk[mask],
+                    labels_chunk[mask],
+                    reduction='sum'
+                )
+                total_loss = total_loss + loss_chunk
+                total_weight = total_weight + mask.sum()
+
+        return total_loss / torch.clamp(total_weight, min=1.0)
 
     def save_student(self, save_path: str):
         """Save the distilled student model"""
