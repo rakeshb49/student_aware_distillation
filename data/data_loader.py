@@ -50,23 +50,30 @@ class DistillationDataset(Dataset):
 
         for dataset_name in dataset_names:
             try:
+                load_kwargs = {
+                    "cache_dir": self.cache_dir
+                }
+
+                if dataset_name in {"bookcorpus"}:
+                    load_kwargs["trust_remote_code"] = True
+
                 # Handle different dataset configurations
                 if dataset_name == "wikitext":
                     ds = load_dataset("wikitext", "wikitext-103-raw-v1",
-                                     split="train", cache_dir=self.cache_dir)
+                                     split="train", **load_kwargs)
                 elif dataset_name == "c4":
                     # C4 is large, only load if explicitly requested and not in recommended
-                    ds = load_dataset("c4", "en", split="train", cache_dir=self.cache_dir)
+                    ds = load_dataset("c4", "en", split="train", **load_kwargs)
                 elif dataset_name == "bookcorpus":
                     ds = load_dataset("bookcorpus", "plain_text", split="train",
-                                     cache_dir=self.cache_dir)
+                                     **load_kwargs)
                 elif dataset_name == "wikipedia":
                     ds = load_dataset("wikipedia", "20220301.en", split="train",
-                                     cache_dir=self.cache_dir)
+                                     **load_kwargs)
                 else:
                     # Try to load custom dataset
                     ds = load_dataset(dataset_name, split="train",
-                                     cache_dir=self.cache_dir)
+                                     **load_kwargs)
 
                 # Limit dataset size if specified
                 if subset_size and len(ds) > subset_size:

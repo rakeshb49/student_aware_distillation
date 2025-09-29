@@ -490,15 +490,21 @@ class StudentAwareDistillationFramework(nn.Module):
         # Handle vocabulary size mismatch
         aligned_teacher_logits = self.vocab_aligner.align_teacher_logits(teacher_logits)
 
+        # Perform KD computations in float32 to avoid half-precision underflow/overflow
+        student_logits_fp32 = student_logits.float()
+        teacher_logits_fp32 = aligned_teacher_logits.float()
+
         # Clamp logits for stability, especially with mixed precision
-        student_logits_clamped = torch.clamp(student_logits, min=-10.0, max=10.0)
-        teacher_logits_clamped = torch.clamp(aligned_teacher_logits, min=-10.0, max=10.0)
+        clamp_min, clamp_max = -30.0, 30.0
+        student_logits_clamped = torch.clamp(student_logits_fp32, min=clamp_min, max=clamp_max)
+        teacher_logits_clamped = torch.clamp(teacher_logits_fp32, min=clamp_min, max=clamp_max)
 
         student_log_probs = F.log_softmax(student_logits_clamped / self.temperature, dim=-1)
         teacher_probs = F.softmax(teacher_logits_clamped / self.temperature, dim=-1)
 
-        # Ensure teacher_probs don't have NaNs from softmax
+        # Ensure teacher_probs don't have NaNs from softmax and remain normalized
         teacher_probs = torch.nan_to_num(teacher_probs, nan=0.0)
+        teacher_probs = teacher_probs / torch.clamp(teacher_probs.sum(dim=-1, keepdim=True), min=1e-8)
 
         kd_loss = self.kd_loss(student_log_probs, teacher_probs) * (self.temperature ** 2)
         losses['kd_loss'] = kd_loss * self.alpha_kd
