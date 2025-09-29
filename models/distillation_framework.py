@@ -367,12 +367,21 @@ class StudentAwareDistillationFramework(nn.Module):
         """Load and configure student model"""
         model_name = self.config.get('student_model', 'HuggingFaceTB/SmolLM-135M')
 
+        # Important: keep student weights in fp32 even when using AMP.
+        # GradScaler expects fp32 params; loading directly in fp16 causes
+        # "Attempting to unscale FP16 gradients" during optimizer steps.
+        student_dtype = torch.float32
+
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            torch_dtype=student_dtype,
             trust_remote_code=True,
             attn_implementation="eager"  # Fix attention implementation warning
         )
+
+        # Disable cache to avoid unnecessary memory spikes during training
+        if hasattr(model.config, "use_cache"):
+            model.config.use_cache = False
 
         return model
 
