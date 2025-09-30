@@ -5,6 +5,7 @@ Tests the complete forward pass without full model loading
 """
 
 import torch
+import torch.nn.functional as F
 import sys
 from pathlib import Path
 
@@ -16,8 +17,9 @@ def test_complete_integration():
     print("Testing complete integration of all fixes...")
 
     try:
+        from transformers import AutoConfig
         from models.distillation_framework import (
-            VocabularyAligner,
+            TeacherToStudentLogitProjector,
             ContrastiveDistillationLoss,
             LayerwiseDistillationLoss,
             AttentionTransferModule
@@ -39,16 +41,31 @@ def test_complete_integration():
         print(f"Teacher: vocab={teacher_vocab}, dim={teacher_dim}")
 
         # 1. Test Vocabulary Alignment
-        print("\n1. Testing vocabulary alignment...")
-        vocab_aligner = VocabularyAligner(teacher_vocab, student_vocab)
+        print("\n1. Testing vocabulary projection...")
+        teacher_config = AutoConfig.from_pretrained("huihui-ai/Huihui-MoE-1B-A0.6B")
+        student_config = AutoConfig.from_pretrained("HuggingFaceTB/SmolLM-135M")
+
+        teacher_dim = getattr(teacher_config, 'hidden_size', 1024)
+        student_dim = getattr(student_config, 'hidden_size', 576)
+
+        teacher_embedding = torch.nn.Embedding(teacher_vocab, teacher_dim)
+        student_embedding = torch.nn.Embedding(student_vocab, student_dim)
+
+        logit_projector = TeacherToStudentLogitProjector(
+            teacher_embedding=teacher_embedding,
+            student_embedding=student_embedding,
+            teacher_dim=teacher_dim,
+            student_dim=student_dim
+        )
 
         teacher_logits = torch.randn(batch_size, seq_len, teacher_vocab)
         student_logits = torch.randn(batch_size, seq_len, student_vocab)
 
-        aligned_teacher_logits = vocab_aligner.align_teacher_logits(teacher_logits)
+        temperature = 4.0
+        teacher_probs = F.softmax(teacher_logits / temperature, dim=-1)
+        aligned_teacher_logits = logit_projector(teacher_probs)
 
         # KL divergence computation
-        temperature = 4.0
         student_log_probs = torch.log_softmax(student_logits / temperature, dim=-1)
         teacher_probs = torch.softmax(aligned_teacher_logits / temperature, dim=-1)
 
@@ -148,7 +165,7 @@ def test_complete_integration():
         # Check if gradients exist
         grad_count = 0
         param_count = 0
-        for component in [vocab_aligner, router, contrastive_loss, layerwise_loss, attention_transfer]:
+        for component in [logit_projector, router, contrastive_loss, layerwise_loss, attention_transfer]:
             for param in component.parameters():
                 param_count += 1
                 if param.grad is not None:

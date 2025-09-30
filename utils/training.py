@@ -264,8 +264,14 @@ class DistillationTrainer:
         progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {self.epoch}")
         
         for batch_idx, batch in enumerate(progress_bar):
-            # Move batch to device
-            batch = {k: v.to(self.device) for k, v in batch.items()}
+            # Move batch to device with dual tokenization
+            student_input_ids = batch['student_input_ids'].to(self.device)
+            student_attention_mask = batch['student_attention_mask'].to(self.device)
+            teacher_input_ids = batch['teacher_input_ids'].to(self.device)
+            teacher_attention_mask = batch['teacher_attention_mask'].to(self.device)
+            labels = batch.get('labels')
+            if labels is not None:
+                labels = labels.to(self.device)
             
             # Memory check
             if batch_idx % 10 == 0:
@@ -282,9 +288,11 @@ class DistillationTrainer:
             if self.use_amp:
                 with autocast(dtype=self.amp_dtype):
                     outputs = self.model(
-                        input_ids=batch['input_ids'],
-                        attention_mask=batch['attention_mask'],
-                        labels=batch.get('labels'),
+                        student_input_ids=student_input_ids,
+                        student_attention_mask=student_attention_mask,
+                        teacher_input_ids=teacher_input_ids,
+                        teacher_attention_mask=teacher_attention_mask,
+                        labels=labels,
                         step=self.global_step
                     )
                     loss = outputs['loss']
@@ -322,9 +330,11 @@ class DistillationTrainer:
             else:
                 # Standard training without mixed precision
                 outputs = self.model(
-                    input_ids=batch['input_ids'],
-                    attention_mask=batch['attention_mask'],
-                    labels=batch.get('labels'),
+                    student_input_ids=student_input_ids,
+                    student_attention_mask=student_attention_mask,
+                    teacher_input_ids=teacher_input_ids,
+                    teacher_attention_mask=teacher_attention_mask,
+                    labels=labels,
                     step=self.global_step
                 )
                 loss = outputs['loss']
@@ -385,20 +395,30 @@ class DistillationTrainer:
         eval_losses = []
         
         for batch in tqdm(self.eval_dataloader, desc="Evaluating"):
-            batch = {k: v.to(self.device) for k, v in batch.items()}
-            
+            student_input_ids = batch['student_input_ids'].to(self.device)
+            student_attention_mask = batch['student_attention_mask'].to(self.device)
+            teacher_input_ids = batch['teacher_input_ids'].to(self.device)
+            teacher_attention_mask = batch['teacher_attention_mask'].to(self.device)
+            labels = batch.get('labels')
+            if labels is not None:
+                labels = labels.to(self.device)
+
             if self.use_amp:
                 with autocast(dtype=self.amp_dtype):
                     outputs = self.model(
-                        input_ids=batch['input_ids'],
-                        attention_mask=batch['attention_mask'],
-                        labels=batch.get('labels')
+                        student_input_ids=student_input_ids,
+                        student_attention_mask=student_attention_mask,
+                        teacher_input_ids=teacher_input_ids,
+                        teacher_attention_mask=teacher_attention_mask,
+                        labels=labels
                     )
             else:
                 outputs = self.model(
-                    input_ids=batch['input_ids'],
-                    attention_mask=batch['attention_mask'],
-                    labels=batch.get('labels')
+                    student_input_ids=student_input_ids,
+                    student_attention_mask=student_attention_mask,
+                    teacher_input_ids=teacher_input_ids,
+                    teacher_attention_mask=teacher_attention_mask,
+                    labels=labels
                 )
             
             eval_losses.append(outputs['loss'].item())

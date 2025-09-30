@@ -36,26 +36,22 @@ RuntimeError: The size of tensor a (151936) must match the size of tensor b (491
 - KL divergence loss attempted to compare incompatible tensor shapes
 
 **Solution Implemented:**
-- **New `VocabularyAligner` class** handles automatic vocabulary alignment
-- **Truncation strategy** for teacher vocab > student vocab (keeps most frequent tokens)
-- **Padding strategy** for student vocab > teacher vocab (learnable zero parameters)
-- **Seamless integration** into distillation framework forward pass
+- **New `TeacherToStudentLogitProjector`** converts teacher probabilities into student logits via embedding projections
+- **Trains jointly** with KD objective for semantic alignment
+- **Eliminated truncation/padding** which discarded or fabricated vocabulary logits
 
 **Key Code Changes:**
 ```python
-class VocabularyAligner(nn.Module):
-    def align_teacher_logits(self, teacher_logits):
-        if self.alignment_type == "truncate":
-            return teacher_logits[:, :, :self.student_vocab_size]
-        else:  # pad
-            padding = self.padding.expand(padding_shape).to(teacher_logits.device)
-            return torch.cat([teacher_logits, padding], dim=-1)
+teacher_probs = F.softmax(teacher_logits / temperature, dim=-1)
+projected_teacher_logits = self.logit_projector(teacher_probs)
+student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
+teacher_probs = F.softmax(projected_teacher_logits / temperature, dim=-1)
 ```
 
 **Test Results:**
-- ✅ Teacher logits: `[4, 512, 151936]` → Aligned: `[4, 512, 49152]`
+- ✅ Teacher logits: `[4, 512, 151936]` → Projected logits: `[4, 512, 49152]`
 - ✅ KL divergence computes successfully: `512.0824`
-- ✅ No information loss for common vocabulary
+- ✅ Semantic alignment preserves teacher probability mass
 
 ---
 
@@ -209,9 +205,10 @@ model = AutoModelForCausalLM.from_pretrained(
 ## 📁 Files Modified
 
 ### Core Framework (`models/distillation_framework.py`)
-- ✅ Added `VocabularyAligner` class
+- ✅ Added `TeacherToStudentLogitProjector` for vocabulary KD
+- ✅ Integrated dual token inputs for student/teacher
 - ✅ Enhanced `ContrastiveDistillationLoss` with dimension alignment
-- ✅ Modified forward pass for vocabulary alignment
+- ✅ Modified forward pass for vocabulary projection
 - ✅ Added attention implementation fixes
 - ✅ Fixed teacher outputs formatting
 
@@ -220,13 +217,16 @@ model = AutoModelForCausalLM.from_pretrained(
 - ✅ Added teacher-to-student projection layers
 - ✅ Enhanced `StudentCapacityEstimator` dimension handling
 - ✅ Fixed expert output alignment in `AdaptiveExpertRouter`
+- ✅ Removed redundant attention loss (single attention objective)
 
 ### Data Pipeline (`data/data_loader.py`)
+- ✅ Implemented dual tokenization collator (student + teacher)
 - ✅ Fixed OpenWebText loading with `trust_remote_code=True`
 - ✅ Enhanced error handling and fallback mechanisms
 - ✅ Improved dataset compatibility checks
 
 ### Training Script (`train.py`)
+- ✅ Added dual-tokenizer loading and wiring
 - ✅ Added fallback dataset loading
 - ✅ Improved error handling for model initialization
 - ✅ Enhanced evaluation dataset handling

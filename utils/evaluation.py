@@ -129,10 +129,11 @@ class MetricsTracker:
 class DistillationEvaluator:
     """Comprehensive evaluation for distilled models"""
     
-    def __init__(self, teacher_model, student_model, tokenizer, device='cuda'):
+    def __init__(self, teacher_model, student_model, student_tokenizer, teacher_tokenizer, device='cuda'):
         self.teacher_model = teacher_model
         self.student_model = student_model
-        self.tokenizer = tokenizer
+        self.student_tokenizer = student_tokenizer
+        self.teacher_tokenizer = teacher_tokenizer
         self.device = device
         
     @torch.no_grad()
@@ -143,12 +144,16 @@ class DistillationEvaluator:
         total_tokens = 0
         
         for batch in dataloader:
-            batch = {k: v.to(self.device) for k, v in batch.items()}
-            
+            student_inputs = {
+                'input_ids': batch['student_input_ids'].to(self.device),
+                'attention_mask': batch['student_attention_mask'].to(self.device),
+                'labels': batch.get('labels').to(self.device) if 'labels' in batch else None
+            }
+
             outputs = model(
-                input_ids=batch['input_ids'],
-                attention_mask=batch['attention_mask'],
-                labels=batch.get('labels')
+                input_ids=student_inputs['input_ids'],
+                attention_mask=student_inputs['attention_mask'],
+                labels=student_inputs['labels']
             )
             
             # Get loss
@@ -158,7 +163,7 @@ class DistillationEvaluator:
                 loss = outputs['loss']
             
             # Count tokens
-            num_tokens = (batch['attention_mask'] == 1).sum().item()
+            num_tokens = (student_inputs['attention_mask'] == 1).sum().item()
             
             total_loss += loss.item() * num_tokens
             total_tokens += num_tokens
@@ -179,30 +184,38 @@ class DistillationEvaluator:
         total_samples = 0
         
         for batch in dataloader:
-            batch = {k: v.to(self.device) for k, v in batch.items()}
-            
-            # Get teacher outputs
+            student_input_ids = batch['student_input_ids'].to(self.device)
+            student_attention_mask = batch['student_attention_mask'].to(self.device)
+            teacher_input_ids = batch['teacher_input_ids'].to(self.device)
+            teacher_attention_mask = batch['teacher_attention_mask'].to(self.device)
+
+            # Get teacher outputs on teacher tokenization
             teacher_outputs = self.teacher_model(
-                input_ids=batch['input_ids'],
-                attention_mask=batch['attention_mask']
+                input_ids=teacher_input_ids,
+                attention_mask=teacher_attention_mask
             )
             teacher_logits = teacher_outputs.logits if hasattr(teacher_outputs, 'logits') else teacher_outputs['logits']
             
-            # Get student outputs
+            # Get student outputs on student tokenization
             student_outputs = self.student_model(
-                input_ids=batch['input_ids'],
-                attention_mask=batch['attention_mask']
+                input_ids=student_input_ids,
+                attention_mask=student_attention_mask
             )
             student_logits = student_outputs.logits if hasattr(student_outputs, 'logits') else student_outputs['logits']
-            
-            # Compute KL divergence
-            teacher_probs = F.softmax(teacher_logits, dim=-1)
+
+            # Because vocabularies differ, align teacher logits via projection if available
+            if hasattr(self.teacher_model, 'project_to_student_vocab'):
+                teacher_vocab_logits = self.teacher_model.project_to_student_vocab(teacher_logits)
+            else:
+                teacher_vocab_logits = teacher_logits
+
+            teacher_probs = F.softmax(teacher_vocab_logits, dim=-1)
             student_log_probs = F.log_softmax(student_logits, dim=-1)
             kl_div = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
             total_kl_div += kl_div.item()
             
             # Compute top-k overlap
-            teacher_topk = torch.topk(teacher_logits, k=top_k, dim=-1).indices
+            teacher_topk = torch.topk(teacher_vocab_logits, k=top_k, dim=-1).indices
             student_topk = torch.topk(student_logits, k=top_k, dim=-1).indices
             
             # Calculate overlap
@@ -259,14 +272,17 @@ class DistillationEvaluator:
             if i >= num_batches:
                 break
             
-            batch = {k: v.to(self.device) for k, v in batch.items()}
+            student_input_ids = batch['student_input_ids'].to(self.device)
+            student_attention_mask = batch['student_attention_mask'].to(self.device)
+            teacher_input_ids = batch['teacher_input_ids'].to(self.device)
+            teacher_attention_mask = batch['teacher_attention_mask'].to(self.device)
             
             # Teacher inference time
             torch.cuda.synchronize() if torch.cuda.is_available() else None
             start = time.time()
             _ = self.teacher_model(
-                input_ids=batch['input_ids'],
-                attention_mask=batch['attention_mask']
+                input_ids=teacher_input_ids,
+                attention_mask=teacher_attention_mask
             )
             torch.cuda.synchronize() if torch.cuda.is_available() else None
             teacher_times.append(time.time() - start)
@@ -275,8 +291,8 @@ class DistillationEvaluator:
             torch.cuda.synchronize() if torch.cuda.is_available() else None
             start = time.time()
             _ = self.student_model(
-                input_ids=batch['input_ids'],
-                attention_mask=batch['attention_mask']
+                input_ids=student_input_ids,
+                attention_mask=student_attention_mask
             )
             torch.cuda.synchronize() if torch.cuda.is_available() else None
             student_times.append(time.time() - start)

@@ -16,7 +16,10 @@ def test_vocab_kl_divergence():
     print("Testing KL divergence with vocabulary size mismatch...")
 
     try:
-        from models.distillation_framework import VocabularyAligner
+        import torch.nn.functional as F
+        import torch.nn.functional as F
+        from models.distillation_framework import TeacherToStudentLogitProjector
+        from transformers import AutoConfig
 
         # Exact dimensions from the error logs
         teacher_vocab = 151936  # From error: "tensor a (151936)"
@@ -27,9 +30,21 @@ def test_vocab_kl_divergence():
 
         print(f"Teacher vocab: {teacher_vocab}, Student vocab: {student_vocab}")
 
-        # Create vocabulary aligner
-        aligner = VocabularyAligner(teacher_vocab, student_vocab)
-        print(f"Alignment type: {aligner.alignment_type}")
+        teacher_config = AutoConfig.from_pretrained("huihui-ai/Huihui-MoE-1B-A0.6B")
+        student_config = AutoConfig.from_pretrained("HuggingFaceTB/SmolLM-135M")
+
+        teacher_dim = getattr(teacher_config, "hidden_size", 1024)
+        student_dim = getattr(student_config, "hidden_size", 576)
+
+        teacher_embedding = torch.nn.Embedding(teacher_vocab, teacher_dim)
+        student_embedding = torch.nn.Embedding(student_vocab, student_dim)
+
+        projector = TeacherToStudentLogitProjector(
+            teacher_embedding=teacher_embedding,
+            student_embedding=student_embedding,
+            teacher_dim=teacher_dim,
+            student_dim=student_dim
+        )
 
         # Simulate the exact tensors that were causing issues
         teacher_logits = torch.randn(batch_size, seq_len, teacher_vocab)
@@ -39,8 +54,9 @@ def test_vocab_kl_divergence():
         print(f"Student logits: {student_logits.shape}")
 
         # Apply vocabulary alignment (this was failing before)
-        aligned_teacher_logits = aligner.align_teacher_logits(teacher_logits)
-        print(f"Aligned teacher logits: {aligned_teacher_logits.shape}")
+        teacher_probs = F.softmax(teacher_logits / temperature, dim=-1)
+        aligned_teacher_logits = projector(teacher_probs)
+        print(f"Projected teacher logits: {aligned_teacher_logits.shape}")
 
         # Test KL divergence computation (this was the exact failing line)
         student_log_probs = torch.log_softmax(student_logits / temperature, dim=-1)
@@ -172,9 +188,20 @@ def test_framework_initialization_minimal():
         }
 
         # Test vocabulary aligner creation
-        from models.distillation_framework import VocabularyAligner
-        aligner = VocabularyAligner(151936, 49152)
-        print(f"Vocab aligner created: needs_alignment={aligner.needs_alignment}")
+        teacher_dim = 1024
+        student_dim = 576
+        teacher_embedding = torch.nn.Embedding(151936, teacher_dim)
+        student_embedding = torch.nn.Embedding(49152, student_dim)
+        from models.distillation_framework import TeacherToStudentLogitProjector
+        projector = TeacherToStudentLogitProjector(
+            teacher_embedding=teacher_embedding,
+            student_embedding=student_embedding,
+            teacher_dim=teacher_dim,
+            student_dim=student_dim
+        )
+        test_probs = torch.softmax(torch.randn(2, 10, 151936), dim=-1)
+        projected_logits = projector(test_probs)
+        print(f"Logit projector output shape: {projected_logits.shape}")
 
         # Test router config creation
         router_config = {

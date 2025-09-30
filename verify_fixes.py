@@ -17,7 +17,7 @@ def test_imports():
     print("Testing imports...")
     try:
         from transformers import AutoTokenizer, AutoModelForCausalLM
-        from models.distillation_framework import VocabularyAligner, StudentAwareDistillationFramework
+        from models.distillation_framework import TeacherToStudentLogitProjector, StudentAwareDistillationFramework
         from data.data_loader import create_distillation_dataloader, get_recommended_datasets
         print("✅ All imports successful")
         return True
@@ -29,20 +29,37 @@ def test_vocabulary_alignment():
     """Test vocabulary alignment with mock data"""
     print("\nTesting vocabulary alignment...")
     try:
-        from models.distillation_framework import VocabularyAligner
+        import torch.nn.functional as F
+        from transformers import AutoConfig
+        from models.distillation_framework import TeacherToStudentLogitProjector
 
         # Test case 1: Teacher vocab larger than student
         teacher_vocab = 151936
         student_vocab = 49152
 
-        aligner = VocabularyAligner(teacher_vocab, student_vocab)
+        teacher_config = AutoConfig.from_pretrained("huihui-ai/Huihui-MoE-1B-A0.6B")
+        student_config = AutoConfig.from_pretrained("HuggingFaceTB/SmolLM-135M")
+
+        teacher_dim = getattr(teacher_config, 'hidden_size', 1024)
+        student_dim = getattr(student_config, 'hidden_size', 576)
+
+        teacher_embedding = torch.nn.Embedding(teacher_vocab, teacher_dim)
+        student_embedding = torch.nn.Embedding(student_vocab, student_dim)
+
+        projector = TeacherToStudentLogitProjector(
+            teacher_embedding=teacher_embedding,
+            student_embedding=student_embedding,
+            teacher_dim=teacher_dim,
+            student_dim=student_dim
+        )
 
         # Mock teacher logits
         batch_size, seq_len = 2, 10
         teacher_logits = torch.randn(batch_size, seq_len, teacher_vocab)
 
-        # Align logits
-        aligned_logits = aligner.align_teacher_logits(teacher_logits)
+        # Project logits
+        teacher_probs = F.softmax(teacher_logits, dim=-1)
+        aligned_logits = projector(teacher_probs)
 
         # Verify shape
         expected_shape = (batch_size, seq_len, student_vocab)
@@ -89,10 +106,18 @@ def test_model_compatibility():
 
         # Test vocabulary aligner with real sizes
         if teacher_vocab and student_vocab:
-            from models.distillation_framework import VocabularyAligner
-            aligner = VocabularyAligner(teacher_vocab, student_vocab)
-            print(f"Vocab alignment needed: {aligner.needs_alignment}")
-            print(f"Alignment type: {aligner.alignment_type if aligner.needs_alignment else 'none'}")
+            from models.distillation_framework import TeacherToStudentLogitProjector
+            teacher_embedding = torch.nn.Embedding(teacher_vocab, teacher_dim)
+            student_embedding = torch.nn.Embedding(student_vocab, student_dim)
+            projector = TeacherToStudentLogitProjector(
+                teacher_embedding=teacher_embedding,
+                student_embedding=student_embedding,
+                teacher_dim=teacher_dim,
+                student_dim=student_dim
+            )
+            test_probs = torch.softmax(torch.randn(2, 5, teacher_vocab), dim=-1)
+            projected = projector(test_probs)
+            print(f"Logit projector output shape: {projected.shape}")
 
         print("✅ Model compatibility verified")
         return True

@@ -415,26 +415,17 @@ class StudentAwareDistillationRouter(nn.Module):
         # Compress teacher knowledge to student space
         teacher_compressed = self.teacher_compressor(routed_knowledge)
 
-        # Attention-based knowledge transfer
-        attended_knowledge, attention_weights = self.attention_transfer(
-            student_hidden, teacher_compressed, teacher_compressed
-        )
-
         # Compute alignment losses
         feature_loss = F.mse_loss(student_projected, routed_knowledge)
-        attention_loss = F.mse_loss(student_hidden, attended_knowledge)
 
         outputs = {
             'routed_knowledge': routed_knowledge,
             'teacher_compressed': teacher_compressed,
-            'attended_knowledge': attended_knowledge,
             'routing_info': routing_info,
             'losses': {
                 'feature_loss': feature_loss,
-                'attention_loss': attention_loss,
                 'load_balance_loss': routing_info['aux_info']['load_balance_loss']
-            },
-            'attention_weights': attention_weights
+            }
         }
 
         return outputs

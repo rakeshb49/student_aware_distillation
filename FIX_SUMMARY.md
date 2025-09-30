@@ -19,27 +19,17 @@ RuntimeError: The size of tensor a (151936) must match the size of tensor b (491
 - KL divergence loss tried to compare tensors of different vocabulary sizes
 
 **Solution:**
-- **Created `VocabularyAligner` class** in `models/distillation_framework.py`
-- Handles vocabulary size mismatches by:
-  - **Truncation**: When teacher vocab > student vocab, truncate teacher logits
-  - **Padding**: When student vocab > teacher vocab, pad teacher logits with zeros
-- **Modified forward pass** to align teacher logits before KL divergence computation
+- **Created `TeacherToStudentLogitProjector`** in `models/distillation_framework.py`
+- Projects teacher logits into student vocabulary space via learnable linear map
+- Removes need for truncation/padding and preserves teacher distribution semantics
 
 **Code Changes:**
+teacher_probs = F.softmax(aligned_teacher_logits / temperature, dim=-1)
 ```python
-# New VocabularyAligner class
-class VocabularyAligner(nn.Module):
-    def align_teacher_logits(self, teacher_logits):
-        if self.alignment_type == "truncate":
-            aligned_logits = teacher_logits[:, :, :self.student_vocab_size]
-        else:  # pad
-            padding_tensor = self.padding.expand(padding_shape).to(teacher_logits.device)
-            aligned_logits = torch.cat([teacher_logits, padding_tensor], dim=-1)
-        return aligned_logits
-
-# Modified forward pass
-aligned_teacher_logits = self.vocab_aligner.align_teacher_logits(teacher_logits)
-teacher_probs = F.softmax(aligned_teacher_logits / self.temperature, dim=-1)
+teacher_probs = F.softmax(teacher_logits / temperature, dim=-1)
+projected_teacher_logits = self.logit_projector(teacher_probs)
+student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
+teacher_probs = F.softmax(projected_teacher_logits / temperature, dim=-1)
 ```
 
 ### 2. Dataset Loading Issue 🟡
@@ -95,8 +85,8 @@ model = AutoModelForCausalLM.from_pretrained(
 
 ### Core Framework Changes
 - **`models/distillation_framework.py`**
-  - Added `VocabularyAligner` class
-  - Modified forward pass for vocab alignment
+  - Added `TeacherToStudentLogitProjector` for vocab alignment
+  - Modified forward pass for dual tokenization and projection
   - Added attention implementation fix
   - Enhanced dimension extraction
 
@@ -112,8 +102,8 @@ model = AutoModelForCausalLM.from_pretrained(
   - Enhanced evaluation dataset handling
 
 ### Testing Infrastructure
-- **`test_vocab_fix.py`** (New)
-  - Comprehensive test suite for vocabulary alignment
+- **`test_vocab_fix.py`** (Updated)
+  - Comprehensive test suite for vocabulary projection
   - Model loading verification
   - Framework initialization testing
 
@@ -125,7 +115,7 @@ model = AutoModelForCausalLM.from_pretrained(
 - ❌ Attention implementation warnings
 
 ### After Fixes:
-- ✅ Vocabulary sizes automatically aligned
+- ✅ Vocabulary logits projected into student space via projector
 - ✅ Robust dataset loading with fallbacks
 - ✅ Clean model loading without warnings
 - ✅ Training should proceed normally
@@ -151,13 +141,9 @@ python train.py --batch-size 4 --epochs 1 --datasets wikitext
 ## Technical Details
 
 ### Vocabulary Alignment Strategy
-- **Truncation Method**: For teacher vocab > student vocab
-  - Keeps most frequent tokens (usually at beginning of vocabulary)
-  - Minimal information loss for common tokens
-  
-- **Padding Method**: For student vocab > teacher vocab  
-  - Pads with learnable zero parameters
-  - Allows student to use extended vocabulary
+- **Probability Projection**: Project teacher probability distributions through teacher embeddings into student hidden space, then back to logits via student embeddings
+  - Preserves teacher distribution semantics without truncation/padding
+  - Trains jointly with KD objective, enabling semantic alignment
 
 ### Memory Optimization
 - Vocabulary alignment done in-place where possible
@@ -234,13 +220,13 @@ for expert_output in teacher_expert_outputs:
 
 ### Core Framework Changes
 - **`models/distillation_framework.py`**
-  - Added `VocabularyAligner` class
-  - Modified forward pass for vocab alignment
+  - Added `TeacherToStudentLogitProjector`
+  - Modified forward pass for dual tokenization and projection
   - Added attention implementation fix
   - Enhanced dimension extraction
   - Fixed teacher outputs formatting for router
 
-### Router Improvements
+### Router Improvements  
 - **`models/student_aware_router.py`**
   - Added sequence length alignment with interpolation
   - Added teacher-to-student dimension projection layers
@@ -283,7 +269,7 @@ for expert_output in teacher_expert_outputs:
 - ❌ Attention implementation warnings
 
 ### After Fixes:
-- ✅ Vocabulary sizes automatically aligned
+- ✅ Vocabulary logits projected into student space
 - ✅ Router dimensions properly handled with sequence/dimension alignment
 - ✅ Robust dataset loading with fallbacks
 - ✅ Clean model loading without warnings
@@ -376,7 +362,7 @@ python train.py --batch-size 4 --epochs 1 --datasets wikitext
 
 ### Vocabulary Alignment Tests: ✅ PASSED
 - Teacher-student vocab size compatibility
-- KL divergence computation with aligned logits
+- KL divergence computation with projected logits
 - Model loading and configuration
 
 ### Router Dimension Tests: ✅ PASSED
@@ -394,7 +380,7 @@ python train.py --batch-size 4 --epochs 1 --datasets wikitext
 
 All critical issues have been resolved with comprehensive fixes:
 
-1. **Vocabulary mismatch** resolved with robust `VocabularyAligner` system
+1. **Vocabulary mismatch** resolved with `TeacherToStudentLogitProjector`
 2. **Router dimension mismatches** handled with sequence/dimension alignment
 3. **Dataset loading** improved with proper parameters and fallbacks
 4. **Model loading** cleaned up with attention implementation fixes

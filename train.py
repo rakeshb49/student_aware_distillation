@@ -197,15 +197,21 @@ def main(args):
     print("="*60 + "\n")
 
     # Initialize tokenizer
-    print("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(
+    print("Loading tokenizers...")
+    student_tokenizer = AutoTokenizer.from_pretrained(
         config['student_model'],
         cache_dir=config['cache_dir']
     )
+    teacher_tokenizer = AutoTokenizer.from_pretrained(
+        config['teacher_model'],
+        cache_dir=config['cache_dir']
+    )
 
-    # Add padding token if not present
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    # Ensure padding tokens are set
+    if student_tokenizer.pad_token is None:
+        student_tokenizer.pad_token = student_tokenizer.eos_token
+    if teacher_tokenizer.pad_token is None:
+        teacher_tokenizer.pad_token = teacher_tokenizer.eos_token
 
     # Create data loaders
     print("\nPreparing datasets...")
@@ -214,44 +220,54 @@ def main(args):
     try:
         train_dataloader = create_distillation_dataloader(
             dataset_names=dataset_names,
-            tokenizer=tokenizer,
+            student_tokenizer=student_tokenizer,
+            teacher_tokenizer=teacher_tokenizer,
             batch_size=config['batch_size'],
             max_length=config['max_length'],
+            teacher_max_length=config.get('teacher_max_length'),
             subset_size=config['dataset_subset_size'],
             shuffle=True,
             num_workers=config['num_workers'],
             use_dynamic_batching=config['use_dynamic_batching'],
-            cache_dir=config['cache_dir']
+            cache_dir=config['cache_dir'],
+            split="train"
         )
     except Exception as e:
         print(f"Warning: Failed to load preferred datasets ({e})")
         print("Falling back to wikitext-2 only...")
         train_dataloader = create_distillation_dataloader(
             dataset_names=["wikitext"],
-            tokenizer=tokenizer,
+            student_tokenizer=student_tokenizer,
+            teacher_tokenizer=teacher_tokenizer,
             batch_size=config['batch_size'],
             max_length=config['max_length'],
+            teacher_max_length=config.get('teacher_max_length'),
             subset_size=config['dataset_subset_size'],
             shuffle=True,
             num_workers=config['num_workers'],
             use_dynamic_batching=config['use_dynamic_batching'],
-            cache_dir=config['cache_dir']
+            cache_dir=config['cache_dir'],
+            split="train"
         )
 
     try:
         eval_dataloader = prepare_eval_dataloader(
-            tokenizer=tokenizer,
+            student_tokenizer=student_tokenizer,
+            teacher_tokenizer=teacher_tokenizer,
             batch_size=config['batch_size'] * 2,  # Larger batch for evaluation
             max_length=config['max_length'],
+            teacher_max_length=config.get('teacher_max_length'),
             cache_dir=config['cache_dir']
         )
     except Exception as e:
         print(f"Warning: Failed to load evaluation dataset ({e})")
         print("Using a smaller evaluation set...")
         eval_dataloader = prepare_eval_dataloader(
-            tokenizer=tokenizer,
+            student_tokenizer=student_tokenizer,
+            teacher_tokenizer=teacher_tokenizer,
             batch_size=config['batch_size'],  # Smaller batch size
             max_length=config['max_length'],
+            teacher_max_length=config.get('teacher_max_length'),
             cache_dir=config['cache_dir']
         )
 
@@ -271,7 +287,11 @@ def main(args):
     }
 
     try:
-        model = StudentAwareDistillationFramework(framework_config)
+        model = StudentAwareDistillationFramework({
+            **framework_config,
+            'student_tokenizer': student_tokenizer,
+            'teacher_tokenizer': teacher_tokenizer
+        })
     except Exception as e:
         print(f"Error initializing distillation framework: {e}")
         print("This might be due to model compatibility issues.")
@@ -329,7 +349,8 @@ def main(args):
             evaluator = DistillationEvaluator(
                 teacher_model=model.teacher_model,
                 student_model=model.student_model,
-                tokenizer=tokenizer,
+                student_tokenizer=student_tokenizer,
+                teacher_tokenizer=teacher_tokenizer,
                 device=str(trainer.device)
             )
 

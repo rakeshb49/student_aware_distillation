@@ -5,9 +5,9 @@ Uses real datasets from HuggingFace with efficient batching and tokenization
 
 import torch
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoTokenizer, DataCollatorForLanguageModeling
+from transformers import AutoTokenizer
 from datasets import load_dataset, concatenate_datasets
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Callable
 import numpy as np
 from tqdm import tqdm
 
@@ -17,32 +17,50 @@ class DistillationDataset(Dataset):
 
     def __init__(self,
                  dataset_names: List[str],
-                 tokenizer: AutoTokenizer,
+                 student_tokenizer: AutoTokenizer,
+                 teacher_tokenizer: AutoTokenizer,
                  max_length: int = 512,
+                 teacher_max_length: Optional[int] = None,
                  subset_size: Optional[int] = None,
-                 cache_dir: str = "./cache"):
+                 cache_dir: str = "./cache",
+                 split: str = "train"):
         """
         Args:
             dataset_names: List of HuggingFace dataset names to use
-            tokenizer: Tokenizer for processing text
+            student_tokenizer: Tokenizer for student model (used for lengths)
+            teacher_tokenizer: Tokenizer for teacher model (kept for reference)
             max_length: Maximum sequence length
+            teacher_max_length: Optional teacher sequence cap (default = max_length)
             subset_size: Optional size limit for dataset
             cache_dir: Directory for caching datasets
+            split: Dataset split to load (train/validation/test)
         """
-        self.tokenizer = tokenizer
+        self.student_tokenizer = student_tokenizer
+        self.teacher_tokenizer = teacher_tokenizer
         self.max_length = max_length
+        self.teacher_max_length = teacher_max_length or max_length
         self.cache_dir = cache_dir
+        self.split = split
 
-        # Load and combine datasets
-        self.dataset = self._load_and_combine_datasets(dataset_names, subset_size)
+        # Load, combine and extract raw texts
+        combined_dataset = self._load_and_combine_datasets(dataset_names, subset_size)
+        self.samples: List[str] = []
+        for example in combined_dataset:
+            text = self._extract_text(example)
+            if text:
+                self.samples.append(text)
 
-        # Preprocess if needed
-        self.dataset = self.dataset.map(
-            self._preprocess_function,
-            batched=True,
-            remove_columns=self.dataset.column_names,
-            desc="Tokenizing dataset"
-        )
+        if subset_size is not None:
+            self.samples = self.samples[:subset_size]
+
+        if not self.samples:
+            raise ValueError("No valid text samples were loaded for the specified datasets.")
+
+        # Pre-compute student token lengths for dynamic batching
+        self.student_lengths: List[int] = [
+            self._compute_token_length(text)
+            for text in self.samples
+        ]
 
     def _load_and_combine_datasets(self, dataset_names: List[str], subset_size: Optional[int]):
         """Load multiple datasets and combine them"""
@@ -60,10 +78,10 @@ class DistillationDataset(Dataset):
                 # Handle different dataset configurations
                 if dataset_name == "wikitext":
                     ds = load_dataset("wikitext", "wikitext-103-raw-v1",
-                                     split="train", **load_kwargs)
+                                     split=self.split, **load_kwargs)
                 elif dataset_name == "c4":
                     # C4 is large, only load if explicitly requested and not in recommended
-                    ds = load_dataset("c4", "en", split="train", **load_kwargs)
+                    ds = load_dataset("c4", "en", split=self.split, **load_kwargs)
                 elif dataset_name == "bookcorpus":
                     ds = load_dataset("bookcorpus", "plain_text", split="train",
                                      **load_kwargs)
@@ -72,7 +90,7 @@ class DistillationDataset(Dataset):
                                      **load_kwargs)
                 else:
                     # Try to load custom dataset
-                    ds = load_dataset(dataset_name, split="train",
+                    ds = load_dataset(dataset_name, split=self.split,
                                      **load_kwargs)
 
                 # Limit dataset size if specified
@@ -90,7 +108,7 @@ class DistillationDataset(Dataset):
             # Fallback to a simple default dataset
             print("Loading default dataset: wikitext-2")
             ds = load_dataset("wikitext", "wikitext-2-raw-v1",
-                            split="train", cache_dir=self.cache_dir)
+                            split=self.split, cache_dir=self.cache_dir)
             if subset_size:
                 ds = ds.select(range(min(len(ds), subset_size)))
             datasets_list = [ds]
@@ -103,54 +121,46 @@ class DistillationDataset(Dataset):
 
         return combined
 
-    def _preprocess_function(self, examples):
-        """Tokenize and prepare examples for training"""
-        # Get text field (handle different dataset formats)
-        if "text" in examples:
-            texts = examples["text"]
-        elif "content" in examples:
-            texts = examples["content"]
-        elif "passage" in examples:
-            texts = examples["passage"]
+    def _extract_text(self, example: Dict) -> Optional[str]:
+        """Extract text field from dataset example"""
+        if "text" in example and isinstance(example["text"], str):
+            text = example["text"]
+        elif "content" in example and isinstance(example["content"], str):
+            text = example["content"]
+        elif "passage" in example and isinstance(example["passage"], str):
+            text = example["passage"]
         else:
-            # Try to find any text field
-            for key in examples.keys():
-                if isinstance(examples[key][0], str):
-                    texts = examples[key]
+            text = None
+            for value in example.values():
+                if isinstance(value, str):
+                    text = value
                     break
-            else:
-                raise ValueError("No text field found in dataset")
 
-        # Filter out empty texts
-        texts = [t for t in texts if t and len(t.strip()) > 0]
+        if text is None:
+            return None
 
-        if not texts:
-            return {"input_ids": [], "attention_mask": [], "labels": []}
+        text = text.strip()
+        return text if text else None
 
-        # Tokenize
-        tokenized = self.tokenizer(
-            texts,
+    def _compute_token_length(self, text: str) -> int:
+        tokens = self.student_tokenizer(
+            text,
             truncation=True,
-            padding="max_length",
             max_length=self.max_length,
-            return_tensors="pt"
+            padding=False,
+            return_attention_mask=False,
+            add_special_tokens=True
         )
-
-        # For language modeling, labels are the same as input_ids
-        tokenized["labels"] = tokenized["input_ids"].clone()
-
-        return tokenized
+        return min(len(tokens["input_ids"]), self.max_length)
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        item = self.dataset[idx]
-        return {
-            "input_ids": torch.tensor(item["input_ids"]),
-            "attention_mask": torch.tensor(item["attention_mask"]),
-            "labels": torch.tensor(item["labels"])
-        }
+        return self.samples[idx]
+
+    def get_length(self, idx: int) -> int:
+        return self.student_lengths[idx]
 
 
 class DynamicBatchSampler:
@@ -169,8 +179,7 @@ class DynamicBatchSampler:
         length_to_indices = {}
 
         for idx in range(len(self.dataset)):
-            item = self.dataset[idx]
-            length = (item["attention_mask"] == 1).sum().item()
+            length = self.dataset.get_length(idx)
 
             if length not in length_to_indices:
                 length_to_indices[length] = []
@@ -208,30 +217,95 @@ class DynamicBatchSampler:
         return total_batches
 
 
+class DualTokenizerCollator:
+    """Collate function that tokenizes with both student and teacher tokenizers"""
+
+    def __init__(self,
+                 student_tokenizer: AutoTokenizer,
+                 teacher_tokenizer: AutoTokenizer,
+                 student_max_length: int,
+                 teacher_max_length: int,
+                 pad_to_multiple_of: int = 8):
+        self.student_tokenizer = student_tokenizer
+        self.teacher_tokenizer = teacher_tokenizer
+        self.student_max_length = student_max_length
+        self.teacher_max_length = teacher_max_length
+        self.pad_to_multiple_of = pad_to_multiple_of
+
+    def __call__(self, batch: List[str]) -> Dict[str, torch.Tensor]:
+        texts = batch
+
+        student_tokens = self.student_tokenizer(
+            texts,
+            padding=False,
+            truncation=True,
+            max_length=self.student_max_length,
+            return_attention_mask=True,
+            add_special_tokens=True
+        )
+        student_tokens = self.student_tokenizer.pad(
+            student_tokens,
+            padding='longest',
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors='pt'
+        )
+
+        teacher_tokens = self.teacher_tokenizer(
+            texts,
+            padding=False,
+            truncation=True,
+            max_length=self.teacher_max_length,
+            return_attention_mask=True,
+            add_special_tokens=True
+        )
+        teacher_tokens = self.teacher_tokenizer.pad(
+            teacher_tokens,
+            padding='longest',
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors='pt'
+        )
+
+        labels = student_tokens["input_ids"].clone()
+
+        return {
+            "student_input_ids": student_tokens["input_ids"],
+            "student_attention_mask": student_tokens["attention_mask"],
+            "teacher_input_ids": teacher_tokens["input_ids"],
+            "teacher_attention_mask": teacher_tokens["attention_mask"],
+            "labels": labels
+        }
+
+
 def create_distillation_dataloader(
     dataset_names: List[str],
-    tokenizer: AutoTokenizer,
+    student_tokenizer: AutoTokenizer,
+    teacher_tokenizer: AutoTokenizer,
     batch_size: int = 8,
     max_length: int = 512,
+    teacher_max_length: Optional[int] = None,
     subset_size: Optional[int] = None,
     shuffle: bool = True,
     num_workers: int = 4,
     use_dynamic_batching: bool = True,
-    cache_dir: str = "./cache"
+    cache_dir: str = "./cache",
+    split: str = "train"
 ) -> DataLoader:
     """
     Create a DataLoader for distillation training
 
     Args:
         dataset_names: List of dataset names to use
-        tokenizer: Tokenizer for text processing
+        student_tokenizer: Student tokenizer for text processing
+        teacher_tokenizer: Teacher tokenizer for text processing
         batch_size: Batch size for training
         max_length: Maximum sequence length
+        teacher_max_length: Maximum teacher sequence length (defaults to max_length)
         subset_size: Optional limit on dataset size
         shuffle: Whether to shuffle data
         num_workers: Number of data loading workers
         use_dynamic_batching: Use dynamic batching by sequence length
         cache_dir: Cache directory for datasets
+        split: Dataset split to load
 
     Returns:
         DataLoader instance
@@ -239,17 +313,21 @@ def create_distillation_dataloader(
     # Create dataset
     dataset = DistillationDataset(
         dataset_names=dataset_names,
-        tokenizer=tokenizer,
+        student_tokenizer=student_tokenizer,
+        teacher_tokenizer=teacher_tokenizer,
         max_length=max_length,
+        teacher_max_length=teacher_max_length,
         subset_size=subset_size,
-        cache_dir=cache_dir
+        cache_dir=cache_dir,
+        split=split
     )
 
-    # Create data collator for padding
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,  # We're doing causal LM, not masked LM
-        pad_to_multiple_of=8  # Efficient for tensor cores
+    data_collator = DualTokenizerCollator(
+        student_tokenizer=student_tokenizer,
+        teacher_tokenizer=teacher_tokenizer,
+        student_max_length=max_length,
+        teacher_max_length=teacher_max_length or max_length,
+        pad_to_multiple_of=8
     )
 
     # Create dataloader
@@ -293,80 +371,58 @@ def get_recommended_datasets() -> List[str]:
 
 
 def prepare_eval_dataloader(
-    tokenizer: AutoTokenizer,
+    student_tokenizer: AutoTokenizer,
+    teacher_tokenizer: AutoTokenizer,
     batch_size: int = 16,
     max_length: int = 512,
+    teacher_max_length: Optional[int] = None,
     cache_dir: str = "./cache"
 ) -> DataLoader:
     """
     Prepare evaluation dataloader
 
     Args:
-        tokenizer: Tokenizer for text processing
+        student_tokenizer: Student tokenizer for text processing
+        teacher_tokenizer: Teacher tokenizer for text processing
         batch_size: Batch size for evaluation
         max_length: Maximum sequence length
+        teacher_max_length: Maximum teacher sequence length
         cache_dir: Cache directory
 
     Returns:
         DataLoader for evaluation
     """
-    # Use wikitext validation set for evaluation
-    eval_dataset = load_dataset(
+    eval_texts = load_dataset(
         "wikitext",
         "wikitext-2-raw-v1",
         split="validation",
         cache_dir=cache_dir
     )
 
-    # Limit size for faster evaluation
-    eval_dataset = eval_dataset.select(range(min(1000, len(eval_dataset))))
+    eval_dataset = DistillationDataset(
+        dataset_names=["wikitext"],
+        student_tokenizer=student_tokenizer,
+        teacher_tokenizer=teacher_tokenizer,
+        max_length=max_length,
+        teacher_max_length=teacher_max_length or max_length,
+        subset_size=min(1000, len(eval_texts)),
+        cache_dir=cache_dir,
+        split="validation"
+    )
 
-    # Create dataset wrapper
-    class EvalDataset(Dataset):
-        def __init__(self, dataset, tokenizer, max_length):
-            self.dataset = dataset
-            self.tokenizer = tokenizer
-            self.max_length = max_length
-            self.processed = []
-
-            # Preprocess all data
-            for item in tqdm(dataset, desc="Processing eval data"):
-                text = item.get("text", "")
-                if text and len(text.strip()) > 0:
-                    tokens = tokenizer(
-                        text,
-                        truncation=True,
-                        padding="max_length",
-                        max_length=max_length,
-                        return_tensors="pt"
-                    )
-                    self.processed.append({
-                        "input_ids": tokens["input_ids"].squeeze(0),
-                        "attention_mask": tokens["attention_mask"].squeeze(0),
-                        "labels": tokens["input_ids"].squeeze(0)
-                    })
-
-        def __len__(self):
-            return len(self.processed)
-
-        def __getitem__(self, idx):
-            return self.processed[idx]
-
-    eval_dataset_wrapped = EvalDataset(eval_dataset, tokenizer, max_length)
-
-    # Create data collator
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,
+    collator = DualTokenizerCollator(
+        student_tokenizer=student_tokenizer,
+        teacher_tokenizer=teacher_tokenizer,
+        student_max_length=max_length,
+        teacher_max_length=teacher_max_length or max_length,
         pad_to_multiple_of=8
     )
 
-    # Create dataloader
     eval_dataloader = DataLoader(
-        eval_dataset_wrapped,
+        eval_dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=data_collator,
+        collate_fn=collator,
         num_workers=2,
         pin_memory=torch.cuda.is_available()
     )

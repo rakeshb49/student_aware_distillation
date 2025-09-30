@@ -19,49 +19,44 @@ from einops import rearrange
 from .student_aware_router import StudentAwareDistillationRouter
 
 
-class VocabularyAligner(nn.Module):
-    """Handles vocabulary size mismatches between teacher and student models"""
+class TeacherToStudentLogitProjector(nn.Module):
+    """Projects teacher probability distributions into student vocabulary space."""
 
-    def __init__(self, teacher_vocab_size: int, student_vocab_size: int):
+    def __init__(self,
+                 teacher_embedding: nn.Module,
+                 student_embedding: nn.Module,
+                 teacher_dim: int,
+                 student_dim: int):
         super().__init__()
-        self.teacher_vocab_size = teacher_vocab_size
-        self.student_vocab_size = student_vocab_size
+        if teacher_embedding is None or student_embedding is None:
+            raise ValueError("Both teacher and student embeddings must be provided for logit projection.")
 
-        if teacher_vocab_size != student_vocab_size:
-            # Create a mapping from teacher vocab to student vocab
-            # For simplicity, we'll use truncation or padding
-            self.needs_alignment = True
+        self.teacher_embedding = teacher_embedding
+        self.student_embedding = student_embedding
+        self.teacher_dim = teacher_dim
+        self.student_dim = student_dim
 
-            if teacher_vocab_size > student_vocab_size:
-                # Teacher has larger vocab - we'll truncate
-                self.alignment_type = "truncate"
-            else:
-                # Student has larger vocab - we'll pad with zeros
-                self.alignment_type = "pad"
-                self.padding = nn.Parameter(
-                    torch.zeros(student_vocab_size - teacher_vocab_size),
-                    requires_grad=False
-                )
-        else:
-            self.needs_alignment = False
+        self.hidden_projector = nn.Linear(teacher_dim, student_dim)
 
-    def align_teacher_logits(self, teacher_logits: torch.Tensor) -> torch.Tensor:
-        """Align teacher logits to match student vocabulary size"""
-        if not self.needs_alignment:
-            return teacher_logits
+    def forward(self, teacher_probs: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            teacher_probs: [batch, seq_len, teacher_vocab]
 
-        batch_size, seq_len, teacher_vocab = teacher_logits.shape
+        Returns:
+            projected_teacher_logits: [batch, seq_len, student_vocab]
+        """
+        # Convert teacher probabilities into expected hidden representations
+        teacher_embedding_weight = self.teacher_embedding.weight  # [teacher_vocab, teacher_dim]
+        teacher_hidden = torch.matmul(teacher_probs, teacher_embedding_weight)
 
-        if self.alignment_type == "truncate":
-            # Truncate teacher logits to student vocab size
-            aligned_logits = teacher_logits[:, :, :self.student_vocab_size]
-        else:  # pad
-            # Pad teacher logits to match student vocab size
-            padding_shape = (batch_size, seq_len, self.student_vocab_size - teacher_vocab)
-            padding_tensor = self.padding.expand(padding_shape).to(teacher_logits.device)
-            aligned_logits = torch.cat([teacher_logits, padding_tensor], dim=-1)
+        # Project to student hidden dimensionality
+        student_hidden = self.hidden_projector(teacher_hidden)
 
-        return aligned_logits
+        # Convert back to student vocabulary logits
+        student_embedding_weight = self.student_embedding.weight  # [student_vocab, student_dim]
+        projected_logits = torch.matmul(student_hidden, student_embedding_weight.t())
+        return projected_logits
 
 
 class FeatureProjector(nn.Module):
@@ -337,6 +332,14 @@ class StudentAwareDistillationFramework(nn.Module):
             teacher_dim=self.teacher_dim
         )
 
+        # Vocabulary projection for KD logits
+        self.logit_projector = TeacherToStudentLogitProjector(
+            teacher_embedding=self.teacher_model.get_input_embeddings(),
+            student_embedding=self.student_model.get_input_embeddings(),
+            teacher_dim=self.teacher_dim,
+            student_dim=self.student_dim
+        )
+
         # Loss weights
         self.alpha_kd = config.get('alpha_kd', 0.7)
         self.alpha_feature = config.get('alpha_feature', 0.1)
@@ -439,20 +442,20 @@ class StudentAwareDistillationFramework(nn.Module):
         if hasattr(self.student_model, 'gradient_checkpointing_enable'):
             self.student_model.gradient_checkpointing_enable()
 
-        # Initialize vocabulary aligner for handling vocab size mismatches
-        self.vocab_aligner = VocabularyAligner(
+        # Initialize vocabulary projection for handling vocab size mismatches
+        self.logit_projector = TeacherToStudentLogitProjector(
             teacher_vocab_size=self.teacher_vocab_size,
             student_vocab_size=self.student_vocab_size
         )
 
     @torch.no_grad()
     def get_teacher_outputs(self,
-                           input_ids: torch.Tensor,
-                           attention_mask: torch.Tensor) -> Dict:
+                           teacher_input_ids: torch.Tensor,
+                           teacher_attention_mask: torch.Tensor) -> Dict:
         """Get teacher model outputs"""
         outputs = self.teacher_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
+            input_ids=teacher_input_ids,
+            attention_mask=teacher_attention_mask,
             output_hidden_states=True,
             output_attentions=True,
             return_dict=True
@@ -477,8 +480,10 @@ class StudentAwareDistillationFramework(nn.Module):
         }
 
     def forward(self,
-                input_ids: torch.Tensor,
-                attention_mask: torch.Tensor,
+                student_input_ids: torch.Tensor,
+                student_attention_mask: torch.Tensor,
+                teacher_input_ids: torch.Tensor,
+                teacher_attention_mask: torch.Tensor,
                 labels: Optional[torch.Tensor] = None,
                 step: Optional[int] = None) -> Dict:
         """
@@ -495,7 +500,7 @@ class StudentAwareDistillationFramework(nn.Module):
         """
         # Get teacher outputs (no gradient)
         with torch.no_grad():
-            teacher_outputs = self.get_teacher_outputs(input_ids, attention_mask)
+            teacher_outputs = self.get_teacher_outputs(teacher_input_ids, teacher_attention_mask)
             teacher_logits = self._sanitize_tensor(
                 teacher_outputs['logits'],
                 'teacher_logits',
@@ -526,8 +531,8 @@ class StudentAwareDistillationFramework(nn.Module):
 
         # Get student outputs (with gradient)
         student_outputs = self.student_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
+            input_ids=student_input_ids,
+            attention_mask=student_attention_mask,
             output_hidden_states=True,
             output_attentions=True,
             return_dict=True
@@ -558,11 +563,12 @@ class StudentAwareDistillationFramework(nn.Module):
 
         # 1. KL Divergence Loss (main distillation loss)
         # Handle vocabulary size mismatch
-        aligned_teacher_logits = self.vocab_aligner.align_teacher_logits(teacher_logits)
+        teacher_probs = F.softmax(teacher_logits / self.temperature, dim=-1)
+        projected_teacher_logits = self.logit_projector(teacher_probs)
 
         # Perform KD computations in float32 to avoid half-precision underflow/overflow
         student_logits_fp32 = student_logits.float()
-        teacher_logits_fp32 = aligned_teacher_logits.float()
+        teacher_logits_fp32 = projected_teacher_logits.float()
 
         # Clamp logits for stability, especially with mixed precision
         clamp_min, clamp_max = -30.0, 30.0
@@ -570,7 +576,8 @@ class StudentAwareDistillationFramework(nn.Module):
         teacher_logits_clamped = torch.clamp(teacher_logits_fp32, min=clamp_min, max=clamp_max)
 
         student_log_probs = F.log_softmax(student_logits_clamped / self.temperature, dim=-1)
-        teacher_probs = F.softmax(teacher_logits_clamped / self.temperature, dim=-1)
+        teacher_probs_clamped = torch.clamp(projected_teacher_logits / self.temperature, min=clamp_min, max=clamp_max)
+        teacher_probs = F.softmax(teacher_probs_clamped, dim=-1)
 
         # Ensure teacher_probs don't have NaNs from softmax and remain normalized
         teacher_probs = torch.nan_to_num(teacher_probs, nan=0.0)
@@ -642,8 +649,8 @@ class StudentAwareDistillationFramework(nn.Module):
             losses['contrastive_loss'] = self._ensure_finite_loss('contrastive_loss', contrastive_loss * self.alpha_contrastive)
 
         # 6. Language modeling loss (if labels provided)
-        if labels is not None:
-            lm_loss = self._chunked_cross_entropy(student_logits, labels)
+            if labels is not None:
+                lm_loss = self._chunked_cross_entropy(student_logits, labels)
             losses['lm_loss'] = self._ensure_finite_loss('lm_loss', lm_loss * (1 - self.alpha_kd))
 
         # Compute total loss
@@ -655,7 +662,7 @@ class StudentAwareDistillationFramework(nn.Module):
             'losses': losses,
             'student_logits': student_logits,
             'teacher_logits': teacher_logits,
-            'routing_info': routing_outputs.get('routing_info', {}) if 'routing_outputs' in locals() else {}
+            'routing_info': routing_outputs['routing_info'] if 'routing_outputs' in locals() else {}
         }
 
     def _chunked_cross_entropy(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:

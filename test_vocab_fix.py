@@ -10,8 +10,9 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from models.distillation_framework import VocabularyAligner
+import torch.nn.functional as F
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from models.distillation_framework import TeacherToStudentLogitProjector
 
 def test_vocab_alignment():
     """Test vocabulary alignment between teacher and student models"""
@@ -28,14 +29,21 @@ def test_vocab_alignment():
     print(f"Teacher vocab size: {teacher_vocab_size}")
     print(f"Student vocab size: {student_vocab_size}")
 
-    # Create vocabulary aligner
-    vocab_aligner = VocabularyAligner(
-        teacher_vocab_size=teacher_vocab_size,
-        student_vocab_size=student_vocab_size
-    )
+    teacher_config = AutoConfig.from_pretrained("huihui-ai/Huihui-MoE-1B-A0.6B")
+    student_config = AutoConfig.from_pretrained("HuggingFaceTB/SmolLM-135M")
 
-    print(f"Alignment needed: {vocab_aligner.needs_alignment}")
-    print(f"Alignment type: {vocab_aligner.alignment_type if vocab_aligner.needs_alignment else 'none'}")
+    teacher_dim = getattr(teacher_config, 'hidden_size', 1024)
+    student_dim = getattr(student_config, 'hidden_size', 576)
+
+    teacher_embedding = torch.nn.Embedding(teacher_vocab_size, teacher_dim)
+    student_embedding = torch.nn.Embedding(student_vocab_size, student_dim)
+
+    logit_projector = TeacherToStudentLogitProjector(
+        teacher_embedding=teacher_embedding,
+        student_embedding=student_embedding,
+        teacher_dim=teacher_dim,
+        student_dim=student_dim
+    )
 
     # Test with mock logits
     batch_size = 2
@@ -46,7 +54,8 @@ def test_vocab_alignment():
     print(f"Teacher logits shape: {teacher_logits.shape}")
 
     # Align teacher logits
-    aligned_logits = vocab_aligner.align_teacher_logits(teacher_logits)
+    teacher_probs = F.softmax(teacher_logits, dim=-1)
+    aligned_logits = logit_projector(teacher_probs)
     print(f"Aligned logits shape: {aligned_logits.shape}")
 
     # Verify alignment
