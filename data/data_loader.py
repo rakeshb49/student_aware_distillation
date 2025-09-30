@@ -237,30 +237,22 @@ class DualTokenizerCollator:
 
         student_tokens = self.student_tokenizer(
             texts,
-            padding=False,
+            padding='longest',
             truncation=True,
             max_length=self.student_max_length,
             return_attention_mask=True,
-            add_special_tokens=True
-        )
-        student_tokens = self.student_tokenizer.pad(
-            student_tokens,
-            padding='longest',
+            add_special_tokens=True,
             pad_to_multiple_of=self.pad_to_multiple_of,
             return_tensors='pt'
         )
 
         teacher_tokens = self.teacher_tokenizer(
             texts,
-            padding=False,
+            padding='longest',
             truncation=True,
             max_length=self.teacher_max_length,
             return_attention_mask=True,
-            add_special_tokens=True
-        )
-        teacher_tokens = self.teacher_tokenizer.pad(
-            teacher_tokens,
-            padding='longest',
+            add_special_tokens=True,
             pad_to_multiple_of=self.pad_to_multiple_of,
             return_tensors='pt'
         )
