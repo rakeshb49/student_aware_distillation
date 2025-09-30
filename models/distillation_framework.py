@@ -568,6 +568,15 @@ class StudentAwareDistillationFramework(nn.Module):
         teacher_probs = F.softmax(teacher_logits / self.temperature, dim=-1)
         projected_teacher_logits = self.logit_projector(teacher_probs)
 
+        # Align sequence lengths between teacher projection and student logits if they differ
+        if projected_teacher_logits.size(1) != student_logits.size(1):
+            projected_teacher_logits = F.interpolate(
+                projected_teacher_logits.transpose(1, 2),
+                size=student_logits.size(1),
+                mode='linear',
+                align_corners=False
+            ).transpose(1, 2)
+
         # Perform KD computations in float32 to avoid half-precision underflow/overflow
         student_logits_fp32 = student_logits.float()
         teacher_logits_fp32 = projected_teacher_logits.float()
