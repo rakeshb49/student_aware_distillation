@@ -394,7 +394,9 @@ class DistillationTrainer:
         self.model.eval()
         eval_losses = []
         
-        for batch in tqdm(self.eval_dataloader, desc="Evaluating"):
+        eval_progress = tqdm(self.eval_dataloader, desc="Evaluating", leave=False)
+
+        for batch in eval_progress:
             student_input_ids = batch['student_input_ids'].to(self.device)
             student_attention_mask = batch['student_attention_mask'].to(self.device)
             teacher_input_ids = batch['teacher_input_ids'].to(self.device)
@@ -422,8 +424,10 @@ class DistillationTrainer:
                 )
             
             eval_losses.append(outputs['loss'].item())
+            eval_progress.set_postfix({'loss': f"{eval_losses[-1]:.4f}"})
         
         eval_loss = np.mean(eval_losses)
+        eval_progress.close()
         
         # Calculate perplexity
         perplexity = np.exp(eval_loss)
@@ -433,6 +437,8 @@ class DistillationTrainer:
             'eval_perplexity': perplexity
         }
         
+        print(f"[Eval] loss: {metrics['eval_loss']:.4f}, ppl: {metrics['eval_perplexity']:.2f}")
+
         # Check if this is the best model
         if eval_loss < self.best_eval_loss:
             self.best_eval_loss = eval_loss
