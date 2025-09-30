@@ -100,6 +100,7 @@ def load_config(config_path: str = None) -> dict:
         'max_grad_norm': 1.0,
         'scheduler_type': 'cosine',
         'use_amp': True,
+        'amp_dtype': 'bfloat16',
         'loss_chunk_size': 128,
         'attention_layers': 4,
 

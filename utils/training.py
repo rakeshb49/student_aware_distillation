@@ -131,7 +131,17 @@ class DistillationTrainer:
         
         # Setup mixed precision training
         self.use_amp = config.get('use_amp', True) and torch.cuda.is_available()
-        self.scaler = GradScaler() if self.use_amp else None
+        amp_dtype = config.get('amp_dtype', 'bfloat16')
+        bf16_supported = torch.cuda.is_available() and getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+
+        if amp_dtype == 'bfloat16' and bf16_supported:
+            self.amp_dtype = torch.bfloat16
+            self.scaler = None  # GradScaler not needed for bf16
+        else:
+            if amp_dtype == 'bfloat16' and torch.cuda.is_available() and not bf16_supported:
+                print("[Info] Requested bf16 autocast but this GPU does not support it; falling back to fp16.")
+            self.amp_dtype = torch.float16
+            self.scaler = GradScaler() if self.use_amp else None
         
         # Setup gradient accumulation
         self.gradient_accumulator = GradientAccumulator(
@@ -264,7 +274,7 @@ class DistillationTrainer:
             
             # Forward pass with mixed precision
             if self.use_amp:
-                with autocast():
+                with autocast(dtype=self.amp_dtype):
                     outputs = self.model(
                         input_ids=batch['input_ids'],
                         attention_mask=batch['attention_mask'],
@@ -272,27 +282,34 @@ class DistillationTrainer:
                         step=self.global_step
                     )
                     loss = outputs['loss']
-                    
+
                     # Scale loss for gradient accumulation
                     loss = self.gradient_accumulator.scale_loss(loss)
-                
-                # Backward pass with scaled gradients
-                self.scaler.scale(loss).backward()
-                
+
+                # Backward pass with scaled gradients when scaler is available
+                if self.scaler:
+                    self.scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
                 # Optimizer step with gradient accumulation
                 if self.gradient_accumulator.should_step():
                     # Gradient clipping
-                    self.scaler.unscale_(self.optimizer)
+                    if self.scaler:
+                        self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), 
+                        self.model.parameters(),
                         self.config.get('max_grad_norm', 1.0)
                     )
-                    
+
                     # Optimizer step
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
+                    if self.scaler:
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        self.optimizer.step()
                     self.optimizer.zero_grad()
-                    
+
                     # Scheduler step
                     if self.scheduler is not None:
                         self.scheduler.step()
@@ -365,7 +382,7 @@ class DistillationTrainer:
             batch = {k: v.to(self.device) for k, v in batch.items()}
             
             if self.use_amp:
-                with autocast():
+                with autocast(dtype=self.amp_dtype):
                     outputs = self.model(
                         input_ids=batch['input_ids'],
                         attention_mask=batch['attention_mask'],

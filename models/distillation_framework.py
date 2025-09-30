@@ -497,12 +497,12 @@ class StudentAwareDistillationFramework(nn.Module):
         with torch.no_grad():
             teacher_outputs = self.get_teacher_outputs(input_ids, attention_mask)
             teacher_logits = self._sanitize_tensor(
-                teacher_outputs['logits'].to(torch.float32),
+                teacher_outputs['logits'],
                 'teacher_logits',
                 clamp_range=(-30.0, 30.0)
             )
             teacher_hidden = [
-                self._sanitize_tensor(h.to(torch.float32), f'teacher_hidden_{idx}')
+                self._sanitize_tensor(h, f'teacher_hidden_{idx}')
                 for idx, h in enumerate(teacher_outputs['hidden_states'])
             ]
             teacher_hidden = [torch.nan_to_num(h, nan=0.0, posinf=0.0, neginf=0.0) for h in teacher_hidden]
@@ -512,14 +512,17 @@ class StudentAwareDistillationFramework(nn.Module):
                 if a is None:
                     teacher_attention.append(None)
                 else:
-                    sanitized_attention = self._sanitize_tensor(a.to(torch.float32), f'teacher_attention_{idx}')
+                    sanitized_attention = self._sanitize_tensor(a, f'teacher_attention_{idx}')
                     teacher_attention.append(torch.nan_to_num(sanitized_attention, nan=0.0, posinf=0.0, neginf=0.0))
 
             raw_teacher_experts = teacher_outputs.get('expert_outputs', [teacher_hidden[-1]])
             teacher_experts = [
-                self._sanitize_tensor(exp.to(torch.float32), f'teacher_expert_{idx}')
+                self._sanitize_tensor(exp, f'teacher_expert_{idx}')
                 for idx, exp in enumerate(raw_teacher_experts)
             ]
+
+            # Release reference to original outputs to free GPU memory early
+            del teacher_outputs
 
         # Get student outputs (with gradient)
         student_outputs = self.student_model(
