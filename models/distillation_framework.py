@@ -450,6 +450,21 @@ class StudentAwareDistillationFramework(nn.Module):
             student_dim=self.student_dim
         )
 
+    def _resize_attention(self, attn_tensor: torch.Tensor, target_len: int) -> torch.Tensor:
+        """Resize attention maps to the target sequence length."""
+        if attn_tensor.size(-1) == target_len and attn_tensor.size(-2) == target_len:
+            return attn_tensor
+
+        b, h, s1, s2 = attn_tensor.shape
+        attn_reshaped = attn_tensor.reshape(b * h, 1, s1, s2)
+        attn_resized = F.interpolate(
+            attn_reshaped,
+            size=(target_len, target_len),
+            mode='bilinear',
+            align_corners=False
+        )
+        return attn_resized.reshape(b, h, target_len, target_len)
+
     @torch.no_grad()
     def get_teacher_outputs(self,
                            teacher_input_ids: torch.Tensor,
@@ -632,6 +647,8 @@ class StudentAwareDistillationFramework(nn.Module):
 
             for s_attn, t_attn in zip(student_attn_subset, teacher_attn_subset):
                 if s_attn is not None and t_attn is not None:
+                    if t_attn.size(-1) != s_attn.size(-1):
+                        t_attn = self._resize_attention(t_attn, s_attn.size(-1))
                     attn_loss = self.attention_transfer(
                         s_attn,
                         t_attn
