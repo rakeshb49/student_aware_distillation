@@ -47,14 +47,14 @@ class TeacherToStudentLogitProjector(nn.Module):
             projected_teacher_logits: [batch, seq_len, student_vocab]
         """
         # Convert teacher probabilities into expected hidden representations
-        teacher_embedding_weight = self.teacher_embedding.weight  # [teacher_vocab, teacher_dim]
+        teacher_embedding_weight = self.teacher_embedding.weight.to(teacher_probs.dtype)  # [teacher_vocab, teacher_dim]
         teacher_hidden = torch.matmul(teacher_probs, teacher_embedding_weight)
 
         # Project to student hidden dimensionality
         student_hidden = self.hidden_projector(teacher_hidden)
 
         # Convert back to student vocabulary logits
-        student_embedding_weight = self.student_embedding.weight  # [student_vocab, student_dim]
+        student_embedding_weight = self.student_embedding.weight.to(student_hidden.dtype)  # [student_vocab, student_dim]
         projected_logits = torch.matmul(student_hidden, student_embedding_weight.t())
         return projected_logits
 
@@ -444,8 +444,10 @@ class StudentAwareDistillationFramework(nn.Module):
 
         # Initialize vocabulary projection for handling vocab size mismatches
         self.logit_projector = TeacherToStudentLogitProjector(
-            teacher_vocab_size=self.teacher_vocab_size,
-            student_vocab_size=self.student_vocab_size
+            teacher_embedding=self.teacher_model.get_input_embeddings(),
+            student_embedding=self.student_model.get_input_embeddings(),
+            teacher_dim=self.teacher_dim,
+            student_dim=self.student_dim
         )
 
     @torch.no_grad()
