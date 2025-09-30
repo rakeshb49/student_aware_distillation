@@ -269,14 +269,14 @@ class DistillationTrainer:
             
             # Memory check
             if batch_idx % 10 == 0:
-            memory_info = self.memory_manager.check_memory()
-            if memory_info.get('usage_percent', 0) > self.memory_manager.threshold:
-                print(f"[Warning] High GPU memory usage detected ({memory_info['usage_percent']:.2f}).")
-                if self.config.get('use_dynamic_batching', True):
-                    print("[Action] Clearing CUDA cache to free memory.")
-                self.memory_manager.cleanup(force=True)
-            else:
-                self.memory_manager.cleanup()
+                memory_info = self.memory_manager.check_memory()
+                if memory_info.get('usage_percent', 0) > self.memory_manager.threshold:
+                    print(f"[Warning] High GPU memory usage detected ({memory_info['usage_percent']:.2f}).")
+                    if self.config.get('use_dynamic_batching', True):
+                        print("[Action] Clearing CUDA cache to free memory.")
+                    self.memory_manager.cleanup(force=True)
+                else:
+                    self.memory_manager.cleanup()
             
             # Forward pass with mixed precision
             if self.use_amp:
