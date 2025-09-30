@@ -12,6 +12,7 @@ import os
 import sys
 from pathlib import Path
 import warnings
+import math
 warnings.filterwarnings('ignore')
 
 # Add project root to path
@@ -130,6 +131,40 @@ def load_config(config_path: str = None) -> dict:
     return default_config
 
 
+def adjust_config_for_hardware(config: dict) -> dict:
+    """Auto-tune config for limited-memory GPUs (e.g., 16GB P100)."""
+    if not torch.cuda.is_available():
+        return config
+
+    props = torch.cuda.get_device_properties(0)
+    total_mem_gb = props.total_memory / 1024**3
+
+    # Empirically, 16GB cards struggle with 4x512 sequences for this setup.
+    if total_mem_gb <= 17:  # includes 16GB class GPUs
+        original_batch = config.get('batch_size', 4)
+        original_accum = config.get('gradient_accumulation_steps', 8)
+        original_effective = original_batch * original_accum
+
+        if original_batch > 2:
+            config['batch_size'] = 2
+            config['gradient_accumulation_steps'] = max(1, math.ceil(original_effective / config['batch_size']))
+            print(
+                f"[Info] Detected {total_mem_gb:.1f}GB GPU; reducing batch size to "
+                f"{config['batch_size']} and increasing gradient accumulation to "
+                f"{config['gradient_accumulation_steps']} for stability."
+            )
+
+        if config.get('max_length', 512) > 384:
+            config['max_length'] = 384
+            print("[Info] Reducing sequence length to 384 tokens to lower memory pressure.")
+
+        if config.get('num_workers', 2) > 1:
+            config['num_workers'] = 1
+            print("[Info] Lowering dataloader workers to 1 to conserve GPU memory.")
+
+    return config
+
+
 def main(args):
     """Main training function"""
     # Setup environment
@@ -145,6 +180,9 @@ def main(args):
         config['num_epochs'] = args.epochs
     if args.learning_rate is not None:
         config['learning_rate'] = args.learning_rate
+
+    # Auto-adjust configuration for hardware constraints
+    config = adjust_config_for_hardware(config)
 
     print("\n" + "="*60)
     print("STUDENT-AWARE KNOWLEDGE DISTILLATION")

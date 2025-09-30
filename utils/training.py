@@ -222,8 +222,8 @@ class DistillationTrainer:
     def _create_scheduler(self):
         """Create learning rate scheduler"""
         scheduler_type = self.config.get('scheduler_type', 'cosine')
-        num_training_steps = len(self.train_dataloader) * self.config.get('num_epochs', 3)
-        num_warmup_steps = self.config.get('warmup_steps', 1000)
+        num_training_steps = max(1, len(self.train_dataloader) * self.config.get('num_epochs', 3))
+        num_warmup_steps = min(self.config.get('warmup_steps', 1000), num_training_steps // 10)
         
         if scheduler_type == 'cosine':
             scheduler = get_linear_schedule_with_warmup(
@@ -269,7 +269,13 @@ class DistillationTrainer:
             
             # Memory check
             if batch_idx % 10 == 0:
-                memory_info = self.memory_manager.check_memory()
+            memory_info = self.memory_manager.check_memory()
+            if memory_info.get('usage_percent', 0) > self.memory_manager.threshold:
+                print(f"[Warning] High GPU memory usage detected ({memory_info['usage_percent']:.2f}).")
+                if self.config.get('use_dynamic_batching', True):
+                    print("[Action] Clearing CUDA cache to free memory.")
+                self.memory_manager.cleanup(force=True)
+            else:
                 self.memory_manager.cleanup()
             
             # Forward pass with mixed precision
