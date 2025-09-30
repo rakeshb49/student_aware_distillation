@@ -221,6 +221,14 @@ class LayerwiseDistillationLoss(nn.Module):
             student_proj = self.projectors[idx](student_hidden_states[s_idx])
             teacher_hidden = teacher_hidden_states[t_idx]
 
+            if teacher_hidden.size(1) != student_proj.size(1):
+                teacher_hidden = F.interpolate(
+                    teacher_hidden.transpose(1, 2),
+                    size=student_proj.size(1),
+                    mode='linear',
+                    align_corners=False
+                ).transpose(1, 2)
+
             # Compute MSE loss for this layer pair
             layer_loss = F.mse_loss(student_proj, teacher_hidden)
 
