@@ -18,6 +18,54 @@ import gc
 import os
 
 
+class EarlyStopping:
+    """Early stopping to halt training when validation metric stops improving"""
+    
+    def __init__(self, patience: int = 3, min_delta: float = 0.01, mode: str = 'min'):
+        """
+        Args:
+            patience: Number of epochs to wait for improvement
+            min_delta: Minimum change to qualify as improvement
+            mode: 'min' for metrics that should decrease (loss), 'max' for metrics that should increase
+        """
+        self.patience = patience
+        self.min_delta = min_delta
+        self.mode = mode
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        
+    def __call__(self, metric: float) -> bool:
+        """
+        Check if training should stop
+        
+        Args:
+            metric: Current metric value
+            
+        Returns:
+            True if should stop, False otherwise
+        """
+        score = -metric if self.mode == 'min' else metric
+        
+        if self.best_score is None:
+            self.best_score = score
+        elif score < self.best_score + self.min_delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.counter = 0
+        
+        return self.early_stop
+    
+    def reset(self):
+        """Reset early stopping state"""
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+
+
 class MemoryManager:
     """Manages GPU memory during training"""
 
@@ -223,6 +271,17 @@ class DistillationTrainer:
         self.memory_manager = MemoryManager(
             threshold=config.get('memory_threshold', 0.9)
         )
+        
+        # Setup early stopping
+        self.use_early_stopping = config.get('use_early_stopping', True)
+        if self.use_early_stopping:
+            self.early_stopping = EarlyStopping(
+                patience=config.get('early_stopping_patience', 3),
+                min_delta=config.get('early_stopping_min_delta', 0.01),
+                mode='min'  # For loss/perplexity
+            )
+        else:
+            self.early_stopping = None
 
         # Setup optimizer
         self.optimizer = self._create_optimizer()
@@ -420,10 +479,10 @@ class DistillationTrainer:
                     # FIX ISSUE #6: Update EMA after optimizer step
                     if self.ema is not None:
                         self.ema.update(self.model)
-                
-                # FIX ISSUE #3: Scheduler should step every batch, not every accumulation
-                if self.scheduler is not None:
-                    self.scheduler.step()
+                    
+                    # CRITICAL FIX: Scheduler should step only when optimizer steps
+                    if self.scheduler is not None:
+                        self.scheduler.step()
             else:
                 # Standard training without mixed precision
                 outputs = self.model(
@@ -451,10 +510,10 @@ class DistillationTrainer:
                     # FIX ISSUE #6: Update EMA after optimizer step
                     if self.ema is not None:
                         self.ema.update(self.model)
-                
-                # FIX ISSUE #3: Scheduler should step every batch, not every accumulation
-                if self.scheduler is not None:
-                    self.scheduler.step()
+                    
+                    # CRITICAL FIX: Scheduler should step only when optimizer steps
+                    if self.scheduler is not None:
+                        self.scheduler.step()
 
             # Track losses
             epoch_losses['total'].append(loss.item() * self.gradient_accumulator.accumulation_steps)
@@ -562,6 +621,12 @@ class DistillationTrainer:
         if eval_loss < self.best_eval_loss:
             self.best_eval_loss = eval_loss
             self.save_checkpoint(best=True)
+        
+        # Check early stopping
+        if self.early_stopping is not None:
+            if self.early_stopping(eval_loss):
+                print(f"\n[Early Stopping] No improvement for {self.early_stopping.patience} evaluations. Stopping training.")
+                metrics['early_stop'] = True
 
         return metrics
 
@@ -589,6 +654,11 @@ class DistillationTrainer:
             if self.eval_dataloader:
                 eval_metrics = self.evaluate()
                 epoch_metrics.update(eval_metrics)
+                
+                # Check early stopping
+                if eval_metrics.get('early_stop', False):
+                    print("\nEarly stopping triggered. Training halted.")
+                    break
 
             # Save checkpoint
             if (epoch + 1) % self.config.get('save_epochs', 1) == 0:
@@ -597,7 +667,8 @@ class DistillationTrainer:
             # Print metrics
             print(f"\nEpoch {epoch + 1} Metrics:")
             for key, value in epoch_metrics.items():
-                print(f"  {key}: {value:.4f}")
+                if key != 'early_stop':
+                    print(f"  {key}: {value:.4f}")
 
             all_metrics.append(epoch_metrics)
 

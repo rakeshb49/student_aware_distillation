@@ -53,5 +53,9 @@
   "ema_decay": 0.9999,
   "use_curriculum": true,
   "label_smoothing": 0.1,
-  "kd_top_k": 0
+  "kd_top_k": 0,
+  
+  "use_early_stopping": true,
+  "early_stopping_patience": 3,
+  "early_stopping_min_delta": 0.01
 }

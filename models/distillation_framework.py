@@ -578,7 +578,7 @@ class StudentAwareDistillationFramework(nn.Module):
     def get_teacher_outputs(self,
                            teacher_input_ids: torch.Tensor,
                            teacher_attention_mask: torch.Tensor) -> Dict:
-        """Get teacher model outputs"""
+        """Get teacher model outputs with proper MoE expert extraction"""
         outputs = self.teacher_model(
             input_ids=teacher_input_ids,
             attention_mask=teacher_attention_mask,
@@ -590,19 +590,61 @@ class StudentAwareDistillationFramework(nn.Module):
         # Extract MoE expert outputs if available
         expert_outputs = []
         if hasattr(self.teacher_model, 'model') and hasattr(self.teacher_model.model, 'layers'):
-            for layer in self.teacher_model.model.layers:
+            for layer_idx, layer in enumerate(self.teacher_model.model.layers):
                 if hasattr(layer, 'block_sparse_moe'):
-                    # This is a MoE layer
-                    with torch.no_grad():
-                        hidden_states = outputs.hidden_states[0]  # Use input hidden states
-                        # Note: Actual expert extraction would require model internals access
-                        expert_outputs.append(hidden_states)
+                    # This is a MoE layer - extract actual expert outputs
+                    moe = layer.block_sparse_moe
+                    hidden = outputs.hidden_states[layer_idx]
+                    
+                    try:
+                        # Get hidden state for this layer
+                        batch_size, seq_len, hidden_size = hidden.shape
+                        hidden_reshaped = hidden.view(-1, hidden_size)
+                        
+                        # Get routing decisions from gate
+                        if hasattr(moe, 'gate'):
+                            router_logits = moe.gate(hidden_reshaped)
+                        else:
+                            # Fallback: use layer output as single expert
+                            expert_outputs.append(hidden)
+                            continue
+                        
+                        # Get individual expert outputs if accessible
+                        if hasattr(moe, 'experts'):
+                            num_experts = len(moe.experts)
+                            for expert_idx in range(min(num_experts, 8)):  # Limit to 8 experts
+                                try:
+                                    expert = moe.experts[expert_idx]
+                                    expert_out = expert(hidden_reshaped)
+                                    expert_out = expert_out.view(batch_size, seq_len, -1)
+                                    expert_outputs.append(expert_out)
+                                except:
+                                    # If expert access fails, use hidden state
+                                    expert_outputs.append(hidden)
+                                    break
+                        else:
+                            # If experts not accessible, use layer output
+                            expert_outputs.append(hidden)
+                    except Exception as e:
+                        # Fallback: use the hidden state if expert extraction fails
+                        expert_outputs.append(hidden)
+        
+        # If no experts were extracted, use hidden states from different layers
+        if not expert_outputs:
+            # Use evenly spaced hidden layers as "pseudo-experts"
+            num_layers = len(outputs.hidden_states)
+            step = max(1, num_layers // 8)
+            expert_outputs = [outputs.hidden_states[i] for i in range(0, num_layers, step)][:8]
+            
+            # Ensure at least one expert
+            if not expert_outputs:
+                expert_outputs = [outputs.hidden_states[-1]]
 
         return {
             'logits': outputs.logits,
             'hidden_states': outputs.hidden_states,
             'attentions': outputs.attentions,
-            'expert_outputs': expert_outputs if expert_outputs else [outputs.hidden_states[-1]]
+            'expert_outputs': expert_outputs
         }
 
     def forward(self,

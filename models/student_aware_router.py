@@ -12,13 +12,14 @@ from einops import rearrange, repeat
 
 
 class StudentCapacityEstimator(nn.Module):
-    """Estimates student model's current learning capacity and knowledge gaps"""
+    """Estimates student model's current learning capacity and knowledge gaps with historical tracking"""
 
-    def __init__(self, student_dim: int, teacher_dim: int, num_experts: int = 8):
+    def __init__(self, student_dim: int, teacher_dim: int, num_experts: int = 8, history_size: int = 100):
         super().__init__()
         self.student_dim = student_dim
         self.teacher_dim = teacher_dim
         self.num_experts = num_experts
+        self.history_size = history_size
 
         # Capacity estimation network
         self.capacity_net = nn.Sequential(
@@ -45,6 +46,18 @@ class StudentCapacityEstimator(nn.Module):
 
         # Adaptive temperature for capacity-aware routing
         self.temperature = nn.Parameter(torch.ones(1) * 0.5)
+        
+        # Track historical capacity metrics for trend analysis
+        self.register_buffer('capacity_history', torch.zeros(history_size, num_experts))
+        self.register_buffer('history_ptr', torch.zeros(1, dtype=torch.long))
+        
+        # Capacity trend analyzer using GRU
+        self.trend_analyzer = nn.GRU(
+            input_size=num_experts,
+            hidden_size=num_experts,
+            num_layers=1,
+            batch_first=True
+        )
 
     def forward(self, student_hidden: torch.Tensor,
                 teacher_hidden: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
@@ -93,10 +106,26 @@ class StudentCapacityEstimator(nn.Module):
             gap_scores = torch.nan_to_num(gap_scores, nan=0.0, posinf=0.0, neginf=0.0)
             gap_scores = F.softmax(gap_scores, dim=-1)
             gap_scores = torch.nan_to_num(gap_scores, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Update capacity history (moving average across batch and sequence)
+        if self.training:
+            capacity_avg = capacity_scores.mean(dim=[0, 1]).detach()  # [num_experts]
+            ptr = self.history_ptr.item()
+            self.capacity_history[ptr] = capacity_avg
+            self.history_ptr[0] = (ptr + 1) % self.history_size
+        
+        # Analyze trend to assess student learning progress
+        capacity_trend = None
+        if self.history_ptr.item() > 10:  # Need some history
+            history = self.capacity_history.unsqueeze(0)  # [1, history_size, num_experts]
+            with torch.no_grad():
+                trend_hidden, _ = self.trend_analyzer(history)
+                capacity_trend = trend_hidden[:, -1, :].squeeze(0)  # [num_experts]
 
         return {
             'capacity_scores': capacity_scores,
             'gap_scores': gap_scores,
+            'capacity_trend': capacity_trend,
             'temperature': self.temperature
         }
 
@@ -284,21 +313,29 @@ class AdaptiveExpertRouter(nn.Module):
         # Apply routing weights
         routing_weights = torch.nan_to_num(routing_weights, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Align routing weights with actual expert count if necessary
+        # CRITICAL FIX: Align routing weights with actual expert count
         actual_experts = expert_stack.size(2)
         if routing_weights.size(-1) != actual_experts:
-            routing_shape = routing_weights.shape
-            routing_weights_flat = routing_weights.reshape(-1, routing_shape[-1]).unsqueeze(1)
-            resized = F.interpolate(
-                routing_weights_flat,
-                size=actual_experts,
-                mode='linear',
-                align_corners=False
-            ).squeeze(1)
-            routing_weights = resized.reshape(routing_shape[0], routing_shape[1], actual_experts)
+            # Can't interpolate categorical distributions - use selection or padding instead
+            if actual_experts < routing_weights.size(-1):
+                # Too many routing weights, select top-k
+                _, topk_indices = torch.topk(routing_weights, k=actual_experts, dim=-1)
+                # Gather the top-k weights
+                routing_weights = torch.gather(routing_weights, dim=-1, index=topk_indices)
+            else:
+                # Too few routing weights, pad with zeros
+                pad_size = actual_experts - routing_weights.size(-1)
+                padding = torch.zeros(
+                    *routing_weights.shape[:-1], pad_size,
+                    device=routing_weights.device, 
+                    dtype=routing_weights.dtype
+                )
+                routing_weights = torch.cat([routing_weights, padding], dim=-1)
+            
+            # Re-normalize
             routing_weights = routing_weights / (routing_weights.sum(dim=-1, keepdim=True) + 1e-8)
 
-        # Update load balance loss with resized routing weights
+        # Update load balance loss with corrected routing weights
         aux_info['load_balance_loss'] = self.compute_load_balance_loss(routing_weights)
 
         routing_weights = routing_weights.unsqueeze(-1)  # [B, L, E, 1]
@@ -414,7 +451,8 @@ class StudentAwareDistillationRouter(nn.Module):
             self.scheduler.current_step = step
             self.adaptive_router.top_k = self.scheduler.get_current_top_k()
             temperature = self.scheduler.get_routing_temperature()
-            self.adaptive_router.capacity_estimator.temperature.data = torch.tensor(temperature)
+            # CRITICAL FIX: Ensure device compatibility when updating temperature
+            self.adaptive_router.capacity_estimator.temperature.data.fill_(temperature)
 
         # Extract teacher expert outputs if available (for MoE)
         if 'expert_outputs' in teacher_outputs:
