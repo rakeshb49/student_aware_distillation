@@ -307,13 +307,10 @@ python train.py --batch-size 4 --epochs 1 --datasets wikitext
 ## Technical Details
 
 ### Vocabulary Alignment Strategy
-- **Truncation Method**: For teacher vocab > student vocab
-  - Keeps most frequent tokens (usually at beginning of vocabulary)
-  - Minimal information loss for common tokens
-  
-- **Padding Method**: For student vocab > teacher vocab  
-  - Pads with learnable zero parameters
-  - Allows student to use extended vocabulary
+- **Probability Projection** (current approach):
+  - Convert teacher logits to probabilities, map through teacher embeddings, project to student hidden space, and decode with student embeddings
+  - Learnable projector jointly optimizes semantic alignment
+  - Avoids truncation/padding while respecting vocabulary differences
 
 ### Router Dimension Handling
 - **Sequence Alignment**: Linear interpolation to match sequence lengths

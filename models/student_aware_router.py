@@ -447,4 +447,14 @@ class StudentAwareDistillationRouter(nn.Module):
             }
         }
 
+        # Optional attention-based alignment between student and routed teacher features
+        attn_alignment = None
+        if hasattr(self, 'attention_transfer') and self.attention_transfer is not None:
+            attn_kv = teacher_compressed
+            attn_output, _ = self.attention_transfer(student_hidden, attn_kv, attn_kv)
+            attn_alignment = F.mse_loss(attn_output, attn_kv)
+
+        if attn_alignment is not None:
+            outputs['losses']['attention_alignment_loss'] = attn_alignment
+
         return outputs

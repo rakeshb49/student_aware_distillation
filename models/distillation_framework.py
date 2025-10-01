@@ -348,6 +348,11 @@ class StudentAwareDistillationFramework(nn.Module):
             student_dim=self.student_dim
         )
 
+        # Store pad token id (used for masking losses)
+        tokenizer = config.get('student_tokenizer')
+        pad_token_id = getattr(tokenizer, 'pad_token_id', None) if tokenizer is not None else None
+        self.pad_token_id = pad_token_id if pad_token_id is not None else -100
+
         # Loss weights
         self.alpha_kd = config.get('alpha_kd', 0.7)
         self.alpha_feature = config.get('alpha_feature', 0.1)
@@ -609,7 +614,17 @@ class StudentAwareDistillationFramework(nn.Module):
         teacher_probs = torch.nan_to_num(teacher_probs, nan=0.0)
         teacher_probs = teacher_probs / torch.clamp(teacher_probs.sum(dim=-1, keepdim=True), min=1e-8)
 
-        kd_loss = self.kd_loss(student_log_probs, teacher_probs) * (self.temperature ** 2)
+        kd_raw = F.kl_div(student_log_probs, teacher_probs, reduction='none')  # [B, L, V]
+        kd_per_token = kd_raw.sum(dim=-1)  # [B, L]
+
+        attention_mask = student_attention_mask
+        if attention_mask is not None:
+            mask = attention_mask[:, :kd_per_token.size(1)].to(kd_per_token.dtype)
+        else:
+            mask = kd_per_token.new_ones(kd_per_token.shape)
+
+        masked_kd = (kd_per_token * mask).sum() / mask.sum().clamp(min=1.0)
+        kd_loss = masked_kd * (self.temperature ** 2)
         losses['kd_loss'] = self._ensure_finite_loss('kd_loss', kd_loss * self.alpha_kd)
 
         # 2. Student-aware routing and feature losses
@@ -629,7 +644,12 @@ class StudentAwareDistillationFramework(nn.Module):
 
             # Add routing losses
             for loss_name, loss_value in routing_outputs['losses'].items():
-                scaled = self._ensure_finite_loss(f'routing_{loss_name}', loss_value * self.alpha_feature)
+                if loss_name == 'attention_alignment_loss':
+                    weight = self.alpha_attention
+                else:
+                    weight = self.alpha_feature
+
+                scaled = self._ensure_finite_loss(f'routing_{loss_name}', loss_value * weight)
                 losses[f'routing_{loss_name}'] = scaled
 
         # 3. Attention transfer loss
@@ -695,9 +715,17 @@ class StudentAwareDistillationFramework(nn.Module):
 
     def _chunked_cross_entropy(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """Compute cross entropy in chunks to reduce activation memory footprint."""
-        vocab_size = logits.size(-1)
-        flat_logits = logits.view(-1, vocab_size)
-        flat_labels = labels.view(-1)
+        # Shift for causal language modeling (predict next token)
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+
+        # Mask padding tokens so they do not contribute to loss
+        if self.pad_token_id != -100:
+            shift_labels = shift_labels.masked_fill(shift_labels == self.pad_token_id, -100)
+
+        vocab_size = shift_logits.size(-1)
+        flat_logits = shift_logits.view(-1, vocab_size)
+        flat_labels = shift_labels.view(-1)
 
         chunk_size = self.loss_chunk_size or flat_logits.size(0)
 

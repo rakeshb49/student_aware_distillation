@@ -156,7 +156,9 @@ def test_framework_initialization():
 
         print(f"Teacher vocab size: {framework.teacher_vocab_size}")
         print(f"Student vocab size: {framework.student_vocab_size}")
-        print(f"Vocab aligner needs alignment: {framework.vocab_aligner.needs_alignment}")
+        has_projector = hasattr(framework, "logit_projector")
+        print(f"Logit projector present: {has_projector}")
+        assert has_projector, "Distillation framework missing logit projector"
 
         return True
 

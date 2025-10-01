@@ -8,7 +8,6 @@ import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, OneCycleLR
-from accelerate import Accelerator
 from transformers import get_linear_schedule_with_warmup
 from typing import Dict, Optional, Tuple, Callable
 from tqdm import tqdm
