@@ -450,14 +450,6 @@ class StudentAwareDistillationFramework(nn.Module):
         if hasattr(self.student_model, 'gradient_checkpointing_enable'):
             self.student_model.gradient_checkpointing_enable()
 
-        # Initialize vocabulary projection for handling vocab size mismatches
-        self.logit_projector = TeacherToStudentLogitProjector(
-            teacher_embedding=self.teacher_model.get_input_embeddings(),
-            student_embedding=self.student_model.get_input_embeddings(),
-            teacher_dim=self.teacher_dim,
-            student_dim=self.student_dim
-        )
-
     def _resize_attention(self, attn_tensor: torch.Tensor, target_len: int) -> torch.Tensor:
         """Resize attention maps to the target sequence length."""
         if attn_tensor.size(-1) == target_len and attn_tensor.size(-2) == target_len:
@@ -685,8 +677,8 @@ class StudentAwareDistillationFramework(nn.Module):
             losses['contrastive_loss'] = self._ensure_finite_loss('contrastive_loss', contrastive_loss * self.alpha_contrastive)
 
         # 6. Language modeling loss (if labels provided)
-            if labels is not None:
-                lm_loss = self._chunked_cross_entropy(student_logits, labels)
+        if labels is not None:
+            lm_loss = self._chunked_cross_entropy(student_logits, labels)
             losses['lm_loss'] = self._ensure_finite_loss('lm_loss', lm_loss * (1 - self.alpha_kd))
 
         # Compute total loss

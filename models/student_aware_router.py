@@ -225,8 +225,9 @@ class AdaptiveExpertRouter(nn.Module):
         # Average routing weights across batch and sequence
         avg_routing = routing_weights.mean(dim=[0, 1])
 
-        # Target uniform distribution
-        uniform_target = torch.full_like(avg_routing, 1.0 / self.num_experts)
+        # Target uniform distribution based on actual expert count
+        expert_count = routing_weights.size(-1)
+        uniform_target = torch.full_like(avg_routing, 1.0 / expert_count)
 
         # Use Mean Squared Error loss for numerical stability (avoids log)
         load_balance_loss = F.mse_loss(avg_routing, uniform_target)
@@ -282,6 +283,24 @@ class AdaptiveExpertRouter(nn.Module):
 
         # Apply routing weights
         routing_weights = torch.nan_to_num(routing_weights, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Align routing weights with actual expert count if necessary
+        actual_experts = expert_stack.size(2)
+        if routing_weights.size(-1) != actual_experts:
+            routing_shape = routing_weights.shape
+            routing_weights_flat = routing_weights.reshape(-1, routing_shape[-1]).unsqueeze(1)
+            resized = F.interpolate(
+                routing_weights_flat,
+                size=actual_experts,
+                mode='linear',
+                align_corners=False
+            ).squeeze(1)
+            routing_weights = resized.reshape(routing_shape[0], routing_shape[1], actual_experts)
+            routing_weights = routing_weights / (routing_weights.sum(dim=-1, keepdim=True) + 1e-8)
+
+        # Update load balance loss with resized routing weights
+        aux_info['load_balance_loss'] = self.compute_load_balance_loss(routing_weights)
+
         routing_weights = routing_weights.unsqueeze(-1)  # [B, L, E, 1]
         routed_output = (expert_stack * routing_weights).sum(dim=2)  # [B, L, D]
         routed_output = torch.nan_to_num(routed_output, nan=0.0, posinf=0.0, neginf=0.0)

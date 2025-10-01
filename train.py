@@ -39,9 +39,8 @@ def setup_environment():
     # Set environment variables for better performance
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
     os.environ['OMP_NUM_THREADS'] = '4'
-    os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+    os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'max_split_size_mb:64, expandable_segments:True')
     os.environ.setdefault('TORCH_NCCL_DEBUG', 'WARN')
-    os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF_MAX_SPLIT_SIZE_MB', '64')
 
     # Check CUDA availability
     if torch.cuda.is_available():
@@ -351,7 +350,9 @@ def main(args):
                 student_model=model.student_model,
                 student_tokenizer=student_tokenizer,
                 teacher_tokenizer=teacher_tokenizer,
-                device=str(trainer.device)
+            device=str(trainer.device),
+            logit_projector=model.logit_projector,
+            temperature=config.get('temperature', 4.0)
             )
 
             report_path = os.path.join(config['log_dir'], 'evaluation_report.txt')

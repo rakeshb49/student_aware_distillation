@@ -174,42 +174,51 @@ class DistillationTrainer:
         # Separate parameters for different learning rates
         no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight"]
 
-        # Get student model parameters (only these need gradients)
         student_params = []
         router_params = []
+        aux_params = []
 
         for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
             if "student_model" in name:
                 student_params.append((name, param))
             elif "router" in name:
                 router_params.append((name, param))
+            else:
+                aux_params.append((name, param))
 
-        # Group parameters
-        optimizer_grouped_parameters = [
-            {
-                "params": [p for n, p in student_params if not any(nd in n for nd in no_decay)],
-                "weight_decay": self.config.get('weight_decay', 0.01),
-                "lr": self.config.get('learning_rate', 5e-5)
-            },
-            {
-                "params": [p for n, p in student_params if any(nd in n for nd in no_decay)],
-                "weight_decay": 0.0,
-                "lr": self.config.get('learning_rate', 5e-5)
-            },
-            {
-                "params": [p for n, p in router_params if not any(nd in n for nd in no_decay)],
-                "weight_decay": self.config.get('weight_decay', 0.01),
-                "lr": self.config.get('router_lr', 1e-4)
-            },
-            {
-                "params": [p for n, p in router_params if any(nd in n for nd in no_decay)],
-                "weight_decay": 0.0,
-                "lr": self.config.get('router_lr', 1e-4)
-            }
-        ]
+        def build_groups(param_list, lr):
+            if not param_list:
+                return []
+            decay_params = [p for n, p in param_list if not any(nd in n for nd in no_decay)]
+            nodecay_params = [p for n, p in param_list if any(nd in n for nd in no_decay)]
+            groups = []
+            if decay_params:
+                groups.append({
+                    "params": decay_params,
+                    "weight_decay": self.config.get('weight_decay', 0.01),
+                    "lr": lr
+                })
+            if nodecay_params:
+                groups.append({
+                    "params": nodecay_params,
+                    "weight_decay": 0.0,
+                    "lr": lr
+                })
+            return groups
 
-        # Filter out empty parameter groups
-        optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if len(g["params"]) > 0]
+        optimizer_grouped_parameters = []
+        optimizer_grouped_parameters.extend(
+            build_groups(student_params, self.config.get('learning_rate', 5e-5))
+        )
+        optimizer_grouped_parameters.extend(
+            build_groups(router_params, self.config.get('router_lr', 1e-4))
+        )
+        aux_lr = self.config.get('aux_lr', self.config.get('learning_rate', 5e-5))
+        optimizer_grouped_parameters.extend(
+            build_groups(aux_params, aux_lr)
+        )
 
         optimizer = AdamW(
             optimizer_grouped_parameters,

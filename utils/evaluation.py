@@ -129,12 +129,15 @@ class MetricsTracker:
 class DistillationEvaluator:
     """Comprehensive evaluation for distilled models"""
     
-    def __init__(self, teacher_model, student_model, student_tokenizer, teacher_tokenizer, device='cuda'):
+    def __init__(self, teacher_model, student_model, student_tokenizer, teacher_tokenizer,
+                 device='cuda', logit_projector=None, temperature: float = 4.0):
         self.teacher_model = teacher_model
         self.student_model = student_model
         self.student_tokenizer = student_tokenizer
         self.teacher_tokenizer = teacher_tokenizer
         self.device = device
+        self.logit_projector = logit_projector
+        self.temperature = temperature
         
     @torch.no_grad()
     def compute_perplexity(self, model, dataloader) -> float:
@@ -144,16 +147,20 @@ class DistillationEvaluator:
         total_tokens = 0
         
         for batch in dataloader:
-            student_inputs = {
-                'input_ids': batch['student_input_ids'].to(self.device),
-                'attention_mask': batch['student_attention_mask'].to(self.device),
-                'labels': batch.get('labels').to(self.device) if 'labels' in batch else None
-            }
+            if model is self.teacher_model:
+                input_ids = batch['teacher_input_ids'].to(self.device)
+                attention_mask = batch['teacher_attention_mask'].to(self.device)
+                labels = input_ids
+            else:
+                input_ids = batch['student_input_ids'].to(self.device)
+                attention_mask = batch['student_attention_mask'].to(self.device)
+                labels = batch.get('labels')
+                labels = labels.to(self.device) if labels is not None else None
 
             outputs = model(
-                input_ids=student_inputs['input_ids'],
-                attention_mask=student_inputs['attention_mask'],
-                labels=student_inputs['labels']
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels
             )
             
             # Get loss
@@ -163,7 +170,7 @@ class DistillationEvaluator:
                 loss = outputs['loss']
             
             # Count tokens
-            num_tokens = (student_inputs['attention_mask'] == 1).sum().item()
+            num_tokens = (attention_mask == 1).sum().item()
             
             total_loss += loss.item() * num_tokens
             total_tokens += num_tokens
@@ -204,18 +211,27 @@ class DistillationEvaluator:
             student_logits = student_outputs.logits if hasattr(student_outputs, 'logits') else student_outputs['logits']
 
             # Because vocabularies differ, align teacher logits via projection if available
-            if hasattr(self.teacher_model, 'project_to_student_vocab'):
-                teacher_vocab_logits = self.teacher_model.project_to_student_vocab(teacher_logits)
+            if self.logit_projector is not None:
+                teacher_probs = F.softmax(teacher_logits / self.temperature, dim=-1)
+                aligned_teacher_logits = self.logit_projector(teacher_probs)
             else:
-                teacher_vocab_logits = teacher_logits
+                teacher_vocab = teacher_logits.size(-1)
+                student_vocab = student_logits.size(-1)
+                if teacher_vocab >= student_vocab:
+                    aligned_teacher_logits = teacher_logits[..., :student_vocab]
+                else:
+                    pad_size = student_vocab - teacher_vocab
+                    pad = torch.zeros(*teacher_logits.shape[:-1], pad_size, device=teacher_logits.device,
+                                      dtype=teacher_logits.dtype)
+                    aligned_teacher_logits = torch.cat([teacher_logits, pad], dim=-1)
 
-            teacher_probs = F.softmax(teacher_vocab_logits, dim=-1)
             student_log_probs = F.log_softmax(student_logits, dim=-1)
+            teacher_probs = F.softmax(aligned_teacher_logits, dim=-1)
             kl_div = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
             total_kl_div += kl_div.item()
             
             # Compute top-k overlap
-            teacher_topk = torch.topk(teacher_vocab_logits, k=top_k, dim=-1).indices
+            teacher_topk = torch.topk(aligned_teacher_logits, k=top_k, dim=-1).indices
             student_topk = torch.topk(student_logits, k=top_k, dim=-1).indices
             
             # Calculate overlap
