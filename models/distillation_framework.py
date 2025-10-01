@@ -556,8 +556,19 @@ class StudentAwareDistillationFramework(nn.Module):
         self.student_vocab_size = getattr(student_config, 'vocab_size', 49152)
 
         # Enable gradient checkpointing to trade compute for memory
+        # CRITICAL FIX #5: Verify gradient checkpointing is properly enabled
         if hasattr(self.student_model, 'gradient_checkpointing_enable'):
             self.student_model.gradient_checkpointing_enable()
+            
+            # Verify that use_cache is disabled (required for gradient checkpointing)
+            if hasattr(self.student_model.config, 'use_cache'):
+                if self.student_model.config.use_cache:
+                    print("[Warning] Gradient checkpointing requires use_cache=False, but it's still True!")
+                    self.student_model.config.use_cache = False
+            
+            print("[Info] Gradient checkpointing enabled for student model")
+        else:
+            print("[Warning] Student model does not support gradient_checkpointing_enable()")
 
     def _resize_attention(self, attn_tensor: torch.Tensor, target_len: int) -> torch.Tensor:
         """Resize attention maps to the target sequence length."""

@@ -223,7 +223,8 @@ class DistillationTrainer:
                  config: Dict,
                  train_dataloader,
                  eval_dataloader=None,
-                 device: Optional[str] = None):
+                 device: Optional[str] = None,
+                 metrics_tracker=None):
         """
         Initialize the trainer
 
@@ -233,11 +234,13 @@ class DistillationTrainer:
             train_dataloader: Training data loader
             eval_dataloader: Evaluation data loader
             device: Device to use (auto-detected if None)
+            metrics_tracker: CRITICAL FIX #3 - Optional MetricsTracker for logging
         """
         self.config = config
         self.model = model
         self.train_dataloader = train_dataloader
         self.eval_dataloader = eval_dataloader
+        self.metrics_tracker = metrics_tracker  # CRITICAL FIX #3: Store metrics tracker
 
         # Setup device
         if device is None:
@@ -538,12 +541,28 @@ class DistillationTrainer:
             if self.eval_dataloader and self.global_step % self.config.get('eval_steps', 500) == 0:
                 eval_metrics = self.evaluate()
                 self.model.train()  # Back to training mode
+                
+                # CRITICAL FIX #4: Check early stopping mid-epoch
+                if eval_metrics.get('early_stop', False):
+                    print(f"\n[Early Stop] Triggered at step {self.global_step} (mid-epoch)")
+                    epoch_metrics['early_stop'] = True
+                    break  # Exit epoch early
 
         # Compute epoch metrics
         epoch_metrics = {
             f'train_{key}': np.mean(values)
             for key, values in epoch_losses.items() if values
         }
+
+        # CRITICAL FIX #3: Log metrics to tracker if available
+        if self.metrics_tracker is not None:
+            # Log without 'train_' prefix for cleaner metrics
+            clean_metrics = {k.replace('train_', ''): v for k, v in epoch_metrics.items()}
+            self.metrics_tracker.update(
+                clean_metrics,
+                split='train',
+                step=self.global_step
+            )
 
         return epoch_metrics
 
@@ -616,6 +635,14 @@ class DistillationTrainer:
         # FIX ISSUE #6: Restore original weights after evaluation with EMA
         if ema_backup is not None:
             self.ema.restore(self.model, ema_backup)
+
+        # CRITICAL FIX #3: Log evaluation metrics to tracker if available
+        if self.metrics_tracker is not None:
+            self.metrics_tracker.update(
+                metrics,
+                split='eval',
+                step=self.global_step
+            )
 
         # Check if this is the best model
         if eval_loss < self.best_eval_loss:
@@ -774,11 +801,20 @@ class DistillationTrainer:
             print(f"Resuming from epoch {self.epoch}, step {self.global_step}")
 
 
-def create_trainer(model, config, train_dataloader, eval_dataloader=None):
-    """Factory function to create a trainer"""
+def create_trainer(model, config, train_dataloader, eval_dataloader=None, metrics_tracker=None):
+    """Factory function to create a trainer
+    
+    Args:
+        model: Distillation framework model
+        config: Training configuration
+        train_dataloader: Training data loader
+        eval_dataloader: Optional evaluation data loader
+        metrics_tracker: Optional MetricsTracker for logging (CRITICAL FIX #3)
+    """
     return DistillationTrainer(
         model=model,
         config=config,
         train_dataloader=train_dataloader,
-        eval_dataloader=eval_dataloader
+        eval_dataloader=eval_dataloader,
+        metrics_tracker=metrics_tracker  # CRITICAL FIX #3: Pass metrics tracker
     )

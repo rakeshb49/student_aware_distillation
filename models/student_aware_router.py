@@ -184,6 +184,15 @@ class AdaptiveExpertRouter(nn.Module):
         capacity_info = self.capacity_estimator(student_hidden, teacher_hidden)
         capacity_scores = capacity_info['capacity_scores']
         gap_scores = capacity_info['gap_scores']
+        capacity_trend = capacity_info.get('capacity_trend')
+
+        # CRITICAL FIX #1: Integrate capacity trend into routing decisions
+        # Boost/dampen routing based on learning progress trends
+        if capacity_trend is not None:
+            # Apply trend adjustment: positive trend → increase capacity scores
+            # trend_factor ranges from ~0.9 to ~1.1 (±10% adjustment)
+            trend_factor = 1.0 + 0.1 * torch.tanh(capacity_trend)
+            capacity_scores = capacity_scores * trend_factor.unsqueeze(0).unsqueeze(0)
 
         # Compute base routing scores
         routing_logits = self.routing_gate(student_hidden)
@@ -213,16 +222,26 @@ class AdaptiveExpertRouter(nn.Module):
         expert_importance = self.expert_scorer(teacher_for_scoring)
         expert_importance = F.softmax(expert_importance, dim=-1)
 
-        # Combine routing signals
+        # CRITICAL FIX #2: Include routing_logits in routing decisions
+        # The routing_gate network was computed with exploration noise but never used!
+        routing_logits_softmax = F.softmax(routing_logits, dim=-1)
+
+        # Combine routing signals (includes learned routing gate)
         if gap_scores is not None:
-            # Weighted combination of capacity, gaps, and importance
+            # Weighted combination: capacity + gaps + teacher importance + learned routing
             combined_scores = (
-                0.4 * capacity_scores +
-                0.3 * gap_scores +
-                0.3 * expert_importance
+                0.3 * capacity_scores +
+                0.25 * gap_scores +
+                0.25 * expert_importance +
+                0.2 * routing_logits_softmax  # Add learned routing component
             )
         else:
-            combined_scores = 0.6 * capacity_scores + 0.4 * expert_importance
+            # Without gap scores: capacity + teacher importance + learned routing
+            combined_scores = (
+                0.4 * capacity_scores +
+                0.3 * expert_importance +
+                0.3 * routing_logits_softmax  # Add learned routing component
+            )
 
         # Apply top-k selection
         topk_scores, topk_indices = torch.topk(

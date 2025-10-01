@@ -313,11 +313,13 @@ def main(args):
 
     # Create trainer
     print("\nInitializing trainer...")
+    # CRITICAL FIX #3: Pass metrics_tracker to trainer for proper logging
     trainer = create_trainer(
         model=model,
         config=config,
         train_dataloader=train_dataloader,
-        eval_dataloader=eval_dataloader
+        eval_dataloader=eval_dataloader,
+        metrics_tracker=metrics_tracker  # CRITICAL FIX #3: Wire up metrics tracker
     )
 
     # Resume from checkpoint if specified
