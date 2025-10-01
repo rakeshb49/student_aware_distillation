@@ -32,12 +32,18 @@ class MemoryManager:
             allocated = torch.cuda.memory_allocated() / 1024**3  # GB
             reserved = torch.cuda.memory_reserved() / 1024**3    # GB
             max_memory = torch.cuda.max_memory_allocated() / 1024**3  # GB
+            
+            # FIX: Use actual GPU memory for accurate usage percentage
+            free_b, total_b = torch.cuda.mem_get_info()
+            used_b = total_b - free_b
 
             return {
                 'allocated_gb': allocated,
                 'reserved_gb': reserved,
                 'max_allocated_gb': max_memory,
-                'usage_percent': allocated / reserved if reserved > 0 else 0
+                'total_gb': total_b / 1024**3,
+                'used_gb': used_b / 1024**3,
+                'usage_percent': used_b / total_b
             }
         else:
             # CPU memory
@@ -133,7 +139,13 @@ class ModelEMA:
         for name, param in model.named_parameters():
             if param.requires_grad and name in self.shadow_params:
                 backup[name] = param.data.clone()
-                param.data.copy_(self.shadow_params[name])
+                # FIX: Ensure device and shape compatibility
+                shadow_param = self.shadow_params[name]
+                if shadow_param.shape == param.data.shape:
+                    param.data.copy_(shadow_param.to(param.device))
+                else:
+                    # Shape mismatch - skip this parameter
+                    print(f"Warning: EMA shape mismatch for {name}: {shadow_param.shape} vs {param.data.shape}")
         return backup
     
     def restore(self, model: nn.Module, backup: Dict):
@@ -609,6 +621,10 @@ class DistillationTrainer:
         # Save student model
         self.model.save_student(path)
 
+        # CRITICAL FIX: Save model state (excluding frozen teacher)
+        model_state = self.model.state_dict()
+        model_state = {k: v for k, v in model_state.items() if not k.startswith('teacher_model.')}
+
         # Save training state (FIX ISSUE #1: include gradient accumulator state)
         checkpoint_state = {
             'epoch': self.epoch,
@@ -617,6 +633,7 @@ class DistillationTrainer:
             'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
             'best_eval_loss': self.best_eval_loss,
             'gradient_accumulator_step_count': self.gradient_accumulator.step_count,
+            'model_state_dict': model_state,  # Save framework weights
             'config': self.config
         }
         
@@ -634,6 +651,20 @@ class DistillationTrainer:
 
     def load_checkpoint(self, path: str):
         """Load model checkpoint"""
+        # CRITICAL FIX: Reload student model weights from saved directory
+        try:
+            from transformers import AutoModelForCausalLM
+            student_model = AutoModelForCausalLM.from_pretrained(
+                path, 
+                trust_remote_code=True,
+                torch_dtype=torch.float32  # Keep student in fp32 for AMP
+            )
+            student_model.to(self.device)
+            self.model.student_model = student_model
+            print("Restored student model weights from saved directory.")
+        except Exception as e:
+            print(f"Warning: could not restore student model from {path}: {e}")
+        
         # Load training state
         state_path = os.path.join(path, 'training_state.pt')
         if os.path.exists(state_path):
@@ -644,6 +675,14 @@ class DistillationTrainer:
             if self.scheduler and state.get('scheduler_state_dict'):
                 self.scheduler.load_state_dict(state['scheduler_state_dict'])
             self.best_eval_loss = state.get('best_eval_loss', float('inf'))
+            
+            # CRITICAL FIX: Restore framework weights (router, projectors, etc.)
+            if 'model_state_dict' in state:
+                missing, unexpected = self.model.load_state_dict(state['model_state_dict'], strict=False)
+                if missing or unexpected:
+                    print(f"Model state restored with missing={len(missing)}, unexpected={len(unexpected)}")
+                else:
+                    print("Model state fully restored")
             
             # FIX ISSUE #1: Restore gradient accumulator state
             if 'gradient_accumulator_step_count' in state:
