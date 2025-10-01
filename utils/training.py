@@ -95,6 +95,66 @@ class GradientAccumulator:
         self.step_count = 0
 
 
+class ModelEMA:
+    """FIX ISSUE #6: Exponential Moving Average for model weights
+    
+    Maintains a moving average of model parameters for more stable checkpoints.
+    SOTA practice from papers like MoCo, BYOL, and modern vision transformers.
+    """
+    
+    def __init__(self, model: nn.Module, decay: float = 0.9999, device: Optional[str] = None):
+        """
+        Args:
+            model: Model to track
+            decay: EMA decay rate (higher = slower update)
+            device: Device for EMA parameters
+        """
+        self.decay = decay
+        self.device = device if device else next(model.parameters()).device
+        
+        # Create shadow parameters
+        self.shadow_params = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow_params[name] = param.data.clone().to(self.device)
+    
+    def update(self, model: nn.Module):
+        """Update EMA parameters"""
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                if param.requires_grad and name in self.shadow_params:
+                    self.shadow_params[name].mul_(self.decay).add_(
+                        param.data.to(self.device), alpha=1 - self.decay
+                    )
+    
+    def apply_shadow(self, model: nn.Module):
+        """Apply EMA parameters to model (for evaluation/saving)"""
+        backup = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in self.shadow_params:
+                backup[name] = param.data.clone()
+                param.data.copy_(self.shadow_params[name])
+        return backup
+    
+    def restore(self, model: nn.Module, backup: Dict):
+        """Restore original parameters"""
+        for name, param in model.named_parameters():
+            if name in backup:
+                param.data.copy_(backup[name])
+    
+    def state_dict(self):
+        """Get EMA state for checkpointing"""
+        return {
+            'decay': self.decay,
+            'shadow_params': self.shadow_params
+        }
+    
+    def load_state_dict(self, state_dict):
+        """Load EMA state from checkpoint"""
+        self.decay = state_dict.get('decay', self.decay)
+        self.shadow_params = state_dict['shadow_params']
+
+
 class DistillationTrainer:
     """Main trainer class for knowledge distillation with mixed precision"""
 
@@ -157,6 +217,18 @@ class DistillationTrainer:
 
         # Setup scheduler
         self.scheduler = self._create_scheduler()
+        
+        # FIX ISSUE #6: Setup EMA for model weights
+        self.use_ema = config.get('use_ema', True)
+        if self.use_ema:
+            self.ema = ModelEMA(
+                self.model, 
+                decay=config.get('ema_decay', 0.9999),
+                device=self.device
+            )
+            print(f"EMA enabled with decay={config.get('ema_decay', 0.9999)}")
+        else:
+            self.ema = None
 
         # Training state
         self.global_step = 0
@@ -330,11 +402,16 @@ class DistillationTrainer:
                         self.scaler.update()
                     else:
                         self.optimizer.step()
-                    self.optimizer.zero_grad()
-
-                    # Scheduler step
-                    if self.scheduler is not None:
-                        self.scheduler.step()
+                    # FIX ISSUE #2: Use set_to_none=True for better memory efficiency
+                    self.optimizer.zero_grad(set_to_none=True)
+                    
+                    # FIX ISSUE #6: Update EMA after optimizer step
+                    if self.ema is not None:
+                        self.ema.update(self.model)
+                
+                # FIX ISSUE #3: Scheduler should step every batch, not every accumulation
+                if self.scheduler is not None:
+                    self.scheduler.step()
             else:
                 # Standard training without mixed precision
                 outputs = self.model(
@@ -356,10 +433,16 @@ class DistillationTrainer:
                         self.config.get('max_grad_norm', 1.0)
                     )
                     self.optimizer.step()
-                    self.optimizer.zero_grad()
-
-                    if self.scheduler is not None:
-                        self.scheduler.step()
+                    # FIX ISSUE #2: Use set_to_none=True for better memory efficiency
+                    self.optimizer.zero_grad(set_to_none=True)
+                    
+                    # FIX ISSUE #6: Update EMA after optimizer step
+                    if self.ema is not None:
+                        self.ema.update(self.model)
+                
+                # FIX ISSUE #3: Scheduler should step every batch, not every accumulation
+                if self.scheduler is not None:
+                    self.scheduler.step()
 
             # Track losses
             epoch_losses['total'].append(loss.item() * self.gradient_accumulator.accumulation_steps)
@@ -401,6 +484,11 @@ class DistillationTrainer:
 
         self.model.eval()
         eval_losses = []
+        
+        # FIX ISSUE #6: Use EMA weights for evaluation if available
+        ema_backup = None
+        if self.ema is not None:
+            ema_backup = self.ema.apply_shadow(self.model)
 
         total_batches = len(self.eval_dataloader)
         print(f"[Eval] Starting evaluation ({total_batches} batches)...")
@@ -453,6 +541,10 @@ class DistillationTrainer:
         }
 
         print(f"[Eval] loss: {metrics['eval_loss']:.4f}, ppl: {metrics['eval_perplexity']:.2f}")
+        
+        # FIX ISSUE #6: Restore original weights after evaluation with EMA
+        if ema_backup is not None:
+            self.ema.restore(self.model, ema_backup)
 
         # Check if this is the best model
         if eval_loss < self.best_eval_loss:
@@ -517,15 +609,26 @@ class DistillationTrainer:
         # Save student model
         self.model.save_student(path)
 
-        # Save training state
-        torch.save({
+        # Save training state (FIX ISSUE #1: include gradient accumulator state)
+        checkpoint_state = {
             'epoch': self.epoch,
             'global_step': self.global_step,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
             'best_eval_loss': self.best_eval_loss,
+            'gradient_accumulator_step_count': self.gradient_accumulator.step_count,
             'config': self.config
-        }, os.path.join(path, 'training_state.pt'))
+        }
+        
+        # Add scaler state if using mixed precision
+        if self.scaler is not None:
+            checkpoint_state['scaler_state_dict'] = self.scaler.state_dict()
+        
+        # FIX ISSUE #6: Add EMA state to checkpoint
+        if self.ema is not None:
+            checkpoint_state['ema_state_dict'] = self.ema.state_dict()
+        
+        torch.save(checkpoint_state, os.path.join(path, 'training_state.pt'))
 
         print(f"Checkpoint saved to {path}")
 
@@ -541,6 +644,21 @@ class DistillationTrainer:
             if self.scheduler and state.get('scheduler_state_dict'):
                 self.scheduler.load_state_dict(state['scheduler_state_dict'])
             self.best_eval_loss = state.get('best_eval_loss', float('inf'))
+            
+            # FIX ISSUE #1: Restore gradient accumulator state
+            if 'gradient_accumulator_step_count' in state:
+                self.gradient_accumulator.step_count = state['gradient_accumulator_step_count']
+                print(f"Restored gradient accumulator step count: {self.gradient_accumulator.step_count}")
+            
+            # Restore scaler state if present
+            if self.scaler is not None and 'scaler_state_dict' in state:
+                self.scaler.load_state_dict(state['scaler_state_dict'])
+                print(f"Restored gradient scaler state")
+            
+            # FIX ISSUE #6: Restore EMA state if present
+            if self.ema is not None and 'ema_state_dict' in state:
+                self.ema.load_state_dict(state['ema_state_dict'])
+                print(f"Restored EMA state")
 
             print(f"Checkpoint loaded from {path}")
             print(f"Resuming from epoch {self.epoch}, step {self.global_step}")

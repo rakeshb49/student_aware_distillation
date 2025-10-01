@@ -127,15 +127,15 @@ class AttentionTransferModule(nn.Module):
         """
         batch_size, _, seq_len, _ = student_attn.shape
 
-        # Align teacher attention heads to student
+        # FIX ISSUE #4: Align teacher attention heads to student
+        # Correct approach: project across head dimension, not spatial dimension
         if self.student_heads != self.teacher_heads:
-            # Reshape for projection
-            teacher_attn = rearrange(teacher_attn, 'b h s1 s2 -> b (s1 s2) h')
+            # Reshape to [batch, seq, seq, heads] for head projection
+            teacher_attn = rearrange(teacher_attn, 'b h s1 s2 -> b s1 s2 h')
+            # Project from teacher_heads to student_heads
             teacher_attn = self.head_projector(teacher_attn)
-            teacher_attn = rearrange(
-                teacher_attn, 'b (s1 s2) h -> b h s1 s2',
-                s1=seq_len, s2=seq_len
-            )
+            # Reshape back to [batch, heads, seq, seq]
+            teacher_attn = rearrange(teacher_attn, 'b s1 s2 h -> b h s1 s2')
 
         # Apply temperature scaling
         student_attn = student_attn / self.temperature
@@ -362,6 +362,10 @@ class StudentAwareDistillationFramework(nn.Module):
 
         # Temperature for KD
         self.temperature = config.get('temperature', 4.0)
+        
+        # FIX ISSUE #8: Curriculum learning for loss weights
+        self.use_curriculum = config.get('use_curriculum', True)
+        self.total_steps = config.get('total_steps', 10000)
 
         # Track which losses already emitted non-finite warnings
         self._loss_warnings_printed = set()
@@ -391,6 +395,56 @@ class StudentAwareDistillationFramework(nn.Module):
                 self._loss_warnings_printed.add(name)
             return torch.zeros_like(value)
         return value
+    
+    def _get_curriculum_weights(self, step: Optional[int] = None) -> Dict[str, float]:
+        """FIX ISSUE #8: Compute curriculum learning weights
+        
+        Progressive loss introduction:
+        - Phase 1 (0-30%): Focus on KD loss only
+        - Phase 2 (30-60%): Add attention and feature losses
+        - Phase 3 (60-100%): Add all losses
+        
+        This stabilizes early training and gradually increases task complexity.
+        """
+        if not self.use_curriculum or step is None:
+            return {
+                'kd': self.alpha_kd,
+                'feature': self.alpha_feature,
+                'attention': self.alpha_attention,
+                'layerwise': self.alpha_layerwise,
+                'contrastive': self.alpha_contrastive
+            }
+        
+        progress = min(1.0, step / self.total_steps)
+        
+        # Phase transitions
+        if progress < 0.3:  # Phase 1: KD only
+            phase_progress = progress / 0.3
+            return {
+                'kd': self.alpha_kd,
+                'feature': 0.0,
+                'attention': 0.0,
+                'layerwise': 0.0,
+                'contrastive': 0.0
+            }
+        elif progress < 0.6:  # Phase 2: Add attention and feature
+            phase_progress = (progress - 0.3) / 0.3
+            return {
+                'kd': self.alpha_kd,
+                'feature': self.alpha_feature * phase_progress,
+                'attention': self.alpha_attention * phase_progress,
+                'layerwise': 0.0,
+                'contrastive': 0.0
+            }
+        else:  # Phase 3: All losses
+            phase_progress = (progress - 0.6) / 0.4
+            return {
+                'kd': self.alpha_kd,
+                'feature': self.alpha_feature,
+                'attention': self.alpha_attention,
+                'layerwise': self.alpha_layerwise * phase_progress,
+                'contrastive': self.alpha_contrastive * phase_progress
+            }
 
     def _load_teacher_model(self):
         """Load and configure teacher model"""
@@ -582,6 +636,9 @@ class StudentAwareDistillationFramework(nn.Module):
 
         # Initialize losses dictionary
         losses = {}
+        
+        # FIX ISSUE #8: Get curriculum learning weights
+        curriculum_weights = self._get_curriculum_weights(step)
 
         # 1. KL Divergence Loss (main distillation loss)
         # Handle vocabulary size mismatch
@@ -625,7 +682,8 @@ class StudentAwareDistillationFramework(nn.Module):
 
         masked_kd = (kd_per_token * mask).sum() / mask.sum().clamp(min=1.0)
         kd_loss = masked_kd * (self.temperature ** 2)
-        losses['kd_loss'] = self._ensure_finite_loss('kd_loss', kd_loss * self.alpha_kd)
+        # FIX ISSUE #8: Use curriculum weight instead of fixed alpha
+        losses['kd_loss'] = self._ensure_finite_loss('kd_loss', kd_loss * curriculum_weights['kd'])
 
         # 2. Student-aware routing and feature losses
         if len(student_hidden) > 0 and len(teacher_hidden) > 0:
@@ -643,11 +701,12 @@ class StudentAwareDistillationFramework(nn.Module):
             )
 
             # Add routing losses
+            # FIX ISSUE #8: Use curriculum weights for routing losses
             for loss_name, loss_value in routing_outputs['losses'].items():
                 if loss_name == 'attention_alignment_loss':
-                    weight = self.alpha_attention
+                    weight = curriculum_weights['attention']
                 else:
-                    weight = self.alpha_feature
+                    weight = curriculum_weights['feature']
 
                 scaled = self._ensure_finite_loss(f'routing_{loss_name}', loss_value * weight)
                 losses[f'routing_{loss_name}'] = scaled
@@ -677,24 +736,27 @@ class StudentAwareDistillationFramework(nn.Module):
 
             if attn_losses:
                 attn_mean = torch.stack(attn_losses).mean()
-                losses['attention_loss'] = self._ensure_finite_loss('attention_loss', attn_mean * self.alpha_attention)
+                # FIX ISSUE #8: Use curriculum weight
+                losses['attention_loss'] = self._ensure_finite_loss('attention_loss', attn_mean * curriculum_weights['attention'])
 
         # 4. Layer-wise distillation loss
-        if len(student_hidden) > 1 and len(teacher_hidden) > 1 and self.alpha_layerwise > 0:
+        # FIX ISSUE #8: Use curriculum weight
+        if len(student_hidden) > 1 and len(teacher_hidden) > 1 and curriculum_weights['layerwise'] > 0:
             layerwise_loss = self.layerwise_loss(
                 list(student_hidden),
                 list(teacher_hidden)
             )
-            losses['layerwise_loss'] = self._ensure_finite_loss('layerwise_loss', layerwise_loss * self.alpha_layerwise)
+            losses['layerwise_loss'] = self._ensure_finite_loss('layerwise_loss', layerwise_loss * curriculum_weights['layerwise'])
 
         # 5. Contrastive loss (using CLS or mean pooling)
-        if self.alpha_contrastive > 0:
+        # FIX ISSUE #8: Use curriculum weight
+        if curriculum_weights['contrastive'] > 0:
             # Mean pooling over sequence dimension
             student_embed = student_hidden[-1].mean(dim=1)
             teacher_embed = teacher_hidden[-1].mean(dim=1)
 
             contrastive_loss = self.contrastive_loss(student_embed, teacher_embed)
-            losses['contrastive_loss'] = self._ensure_finite_loss('contrastive_loss', contrastive_loss * self.alpha_contrastive)
+            losses['contrastive_loss'] = self._ensure_finite_loss('contrastive_loss', contrastive_loss * curriculum_weights['contrastive'])
 
         # 6. Language modeling loss (if labels provided)
         if labels is not None:
@@ -714,7 +776,10 @@ class StudentAwareDistillationFramework(nn.Module):
         }
 
     def _chunked_cross_entropy(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """Compute cross entropy in chunks to reduce activation memory footprint."""
+        """Compute cross entropy in chunks to reduce activation memory footprint.
+        
+        FIX ISSUE #9: Added label smoothing for better generalization.
+        """
         # Shift for causal language modeling (predict next token)
         shift_logits = logits[:, :-1, :].contiguous()
         shift_labels = labels[:, 1:].contiguous()
@@ -728,12 +793,16 @@ class StudentAwareDistillationFramework(nn.Module):
         flat_labels = shift_labels.view(-1)
 
         chunk_size = self.loss_chunk_size or flat_logits.size(0)
+        
+        # FIX ISSUE #9: Use label smoothing (SOTA: 0.1)
+        label_smoothing = self.config.get('label_smoothing', 0.1)
 
         if chunk_size >= flat_logits.size(0):
             return F.cross_entropy(
                 flat_logits,
                 flat_labels,
-                ignore_index=-100
+                ignore_index=-100,
+                label_smoothing=label_smoothing
             )
 
         total_loss = logits.new_zeros(())
@@ -749,7 +818,8 @@ class StudentAwareDistillationFramework(nn.Module):
                 loss_chunk = F.cross_entropy(
                     logits_chunk[mask],
                     labels_chunk[mask],
-                    reduction='sum'
+                    reduction='sum',
+                    label_smoothing=label_smoothing  # FIX ISSUE #9
                 )
                 total_loss = total_loss + loss_chunk
                 total_weight = total_weight + mask.sum()
