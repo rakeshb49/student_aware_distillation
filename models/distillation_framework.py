@@ -805,6 +805,17 @@ class StudentAwareDistillationFramework(nn.Module):
         # FIX ISSUE #8: Get curriculum learning weights
         curriculum_weights = self._get_curriculum_weights(step)
 
+        # DEBUG: Log curriculum weights periodically
+        if step % 500 == 0 or step < 10:
+            progress_pct = (step / self.total_steps) * 100 if self.total_steps > 0 else 0
+            print(f"\n{'='*60}")
+            print(f"[CURRICULUM] Step {step}, Progress {progress_pct:.1f}%")
+            print(f"{'='*60}")
+            print(f"  Curriculum weights:")
+            for k, v in curriculum_weights.items():
+                print(f"    {k}: {v:.4f}")
+            print(f"{'='*60}\n")
+
         # FIX ISSUE #10: Get curriculum temperature (annealing)
         current_temperature = self._get_curriculum_temperature(step)
 
@@ -872,7 +883,17 @@ class StudentAwareDistillationFramework(nn.Module):
         # FIX ISSUE #8: Use curriculum weight instead of fixed alpha
         weighted_kd = kd_loss * curriculum_weights['kd']
         losses['kd_loss'] = self._ensure_finite_loss('kd_loss', weighted_kd)
-        
+
+        # DEBUG: Log KD loss details
+        if step % 500 == 0 or step < 10:
+            print(f"\n{'='*60}")
+            print(f"[KD LOSS] Step {step}")
+            print(f"{'='*60}")
+            print(f"  Raw KD loss: {kd_loss.item():.4f}")
+            print(f"  Curriculum weight: {curriculum_weights['kd']:.4f}")
+            print(f"  Weighted KD loss: {weighted_kd.item():.4f}")
+            print(f"{'='*60}\n")
+
         # 2. Student-aware routing and feature losses
         if len(student_hidden) > 0 and len(teacher_hidden) > 0:
             # Use last hidden state for routing
@@ -898,6 +919,24 @@ class StudentAwareDistillationFramework(nn.Module):
 
                 scaled = self._ensure_finite_loss(f'routing_{loss_name}', loss_value * weight)
                 losses[f'routing_{loss_name}'] = scaled
+
+            # DEBUG: Log routing losses details
+            if step % 500 == 0 or step < 10:
+                print(f"\n{'='*60}")
+                print(f"[ROUTING LOSSES] Step {step}")
+                print(f"{'='*60}")
+                for loss_name, loss_value in routing_outputs['losses'].items():
+                    raw_val = loss_value.item()
+                    if loss_name == 'attention_alignment_loss':
+                        weight = curriculum_weights['attention']
+                    else:
+                        weight = curriculum_weights['feature']
+                    scaled_val = raw_val * weight
+                    print(f"  {loss_name}:")
+                    print(f"    Raw: {raw_val:.4f}")
+                    print(f"    Weight: {weight:.4f}")
+                    print(f"    Scaled: {scaled_val:.4f}")
+                print(f"{'='*60}\n")
 
         # 3. Attention transfer loss
         if student_attention and teacher_attention and self.alpha_attention > 0:

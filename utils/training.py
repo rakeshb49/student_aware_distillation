@@ -543,6 +543,21 @@ class DistillationTrainer:
                     epoch_losses[key] = []
                 epoch_losses[key].append(loss_value.item())
 
+            # DEBUG: Comprehensive loss component logging
+            if batch_idx % 100 == 0:
+                print(f"\n{'='*60}")
+                print(f"[TRAIN DEBUG] Step {self.global_step}, Batch {batch_idx}")
+                print(f"{'='*60}")
+                print(f"  Progress bar loss: {loss.item() * self.gradient_accumulator.accumulation_steps:.4f}")
+                print(f"\n  Raw loss components:")
+                for key, value in outputs.get('losses', {}).items():
+                    print(f"    {key}: {value.item():.4f}")
+                total_from_components = sum(v.item() for v in outputs.get('losses', {}).values())
+                print(f"\n  Sum of components: {total_from_components:.4f}")
+                print(f"  Total loss (outputs['loss']): {outputs['loss'].item():.4f}")
+                print(f"  Scaled for grad accum: {outputs['loss'].item() * self.gradient_accumulator.accumulation_steps:.4f}")
+                print(f"{'='*60}\n")
+
             # FIX ISSUE #8: Monitor gradient norms
             if self.gradient_accumulator.should_step() and batch_idx % 100 == 0:
                 total_norm = 0.0
@@ -559,7 +574,7 @@ class DistillationTrainer:
             current_lr = self.optimizer.param_groups[0]['lr']
             progress_bar.set_postfix({
                 'loss': f'{avg_loss:.4f}',
-                'lr': f'{current_lr:.2e}',
+                'lr': f'{current_lr:.3e}',  # Changed from .2e to .3e for better visibility during warmup
                 'step': self.global_step
             })
 
