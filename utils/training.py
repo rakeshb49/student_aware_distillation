@@ -377,8 +377,20 @@ class DistillationTrainer:
     def _create_scheduler(self):
         """Create learning rate scheduler"""
         scheduler_type = self.config.get('scheduler_type', 'cosine')
-        num_training_steps = max(1, len(self.train_dataloader) * self.config.get('num_epochs', 3))
+
+        # CRITICAL FIX: Calculate actual optimizer steps, not batch steps
+        # The scheduler.step() is called only when optimizer steps (after gradient accumulation)
+        total_batches = len(self.train_dataloader) * self.config.get('num_epochs', 3)
+        grad_accum_steps = self.config.get('gradient_accumulation_steps', 1)
+        num_training_steps = max(1, total_batches // grad_accum_steps)
+
         num_warmup_steps = min(self.config.get('warmup_steps', 1000), num_training_steps // 10)
+
+        # Debug logging to verify scheduler configuration
+        print(f"[Scheduler] Total batches: {total_batches:,}")
+        print(f"[Scheduler] Gradient accumulation: {grad_accum_steps}")
+        print(f"[Scheduler] Optimizer steps: {num_training_steps:,}")
+        print(f"[Scheduler] Warmup steps: {num_warmup_steps:,} ({num_warmup_steps/num_training_steps*100:.1f}%)")
 
         if scheduler_type == 'cosine':
             scheduler = get_linear_schedule_with_warmup(
