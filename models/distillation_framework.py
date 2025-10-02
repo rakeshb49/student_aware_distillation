@@ -806,7 +806,7 @@ class StudentAwareDistillationFramework(nn.Module):
         curriculum_weights = self._get_curriculum_weights(step)
 
         # DEBUG: Log curriculum weights periodically
-        if step % 500 == 0 or step < 10:
+        if step is not None and (step % 500 == 0 or step < 10):
             progress_pct = (step / self.total_steps) * 100 if self.total_steps > 0 else 0
             print(f"\n{'='*60}")
             print(f"[CURRICULUM] Step {step}, Progress {progress_pct:.1f}%")
@@ -885,7 +885,7 @@ class StudentAwareDistillationFramework(nn.Module):
         losses['kd_loss'] = self._ensure_finite_loss('kd_loss', weighted_kd)
 
         # DEBUG: Log KD loss details
-        if step % 500 == 0 or step < 10:
+        if step is not None and (step % 500 == 0 or step < 10):
             print(f"\n{'='*60}")
             print(f"[KD LOSS] Step {step}")
             print(f"{'='*60}")
@@ -921,7 +921,7 @@ class StudentAwareDistillationFramework(nn.Module):
                 losses[f'routing_{loss_name}'] = scaled
 
             # DEBUG: Log routing losses details
-            if step % 500 == 0 or step < 10:
+            if step is not None and (step % 500 == 0 or step < 10):
                 print(f"\n{'='*60}")
                 print(f"[ROUTING LOSSES] Step {step}")
                 print(f"{'='*60}")

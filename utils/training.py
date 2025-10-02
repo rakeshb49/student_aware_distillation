@@ -661,7 +661,8 @@ class DistillationTrainer:
                         student_attention_mask=student_attention_mask,
                         teacher_input_ids=teacher_input_ids,
                         teacher_attention_mask=teacher_attention_mask,
-                        labels=labels
+                        labels=labels,
+                        step=self.global_step
                     )
             else:
                 outputs = self.model(
@@ -669,7 +670,8 @@ class DistillationTrainer:
                     student_attention_mask=student_attention_mask,
                     teacher_input_ids=teacher_input_ids,
                     teacher_attention_mask=teacher_attention_mask,
-                    labels=labels
+                    labels=labels,
+                    step=self.global_step
                 )
 
             eval_losses.append(outputs['loss'].item())
