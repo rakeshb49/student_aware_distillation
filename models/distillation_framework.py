@@ -21,7 +21,7 @@ from .student_aware_router import StudentAwareDistillationRouter
 
 class TeacherToStudentLogitProjector(nn.Module):
     """Projects teacher probability distributions into student vocabulary space.
-    
+
     CRITICAL PERFORMANCE FIX: Uses teacher hidden states directly to avoid
     O(B·L·Vt·Dt) compute/memory bottleneck (Vt≈152k on P100 causes OOM).
     """
@@ -42,13 +42,13 @@ class TeacherToStudentLogitProjector(nn.Module):
 
         self.hidden_projector = nn.Linear(teacher_dim, student_dim)
 
-    def forward(self, 
+    def forward(self,
                 teacher_probs: torch.Tensor = None,
                 teacher_hidden: torch.Tensor = None) -> torch.Tensor:
         """
         Preferred fast path: pass teacher_hidden [B, L, Dt] to avoid O(B·L·Vt·Dt) cost.
         Fallback: teacher_probs [B, L, Vt] for compatibility with existing tests.
-        
+
         Args:
             teacher_probs: [batch, seq_len, teacher_vocab] (fallback, slow)
             teacher_hidden: [batch, seq_len, teacher_dim] (preferred, fast)
@@ -375,15 +375,21 @@ class StudentAwareDistillationFramework(nn.Module):
         self.alpha_layerwise = config.get('alpha_layerwise', 0.05)
         self.alpha_contrastive = config.get('alpha_contrastive', 0.05)
 
-        # Temperature for KD
-        self.temperature = config.get('temperature', 4.0)
-        
+        # FIX ISSUE #10: Temperature for KD with curriculum (start high, reduce gradually)
+        self.base_temperature = config.get('temperature', 3.0)  # Reduced from 4.0 to 3.0
+        self.min_temperature = config.get('min_temperature', 2.0)
+        self.use_temperature_curriculum = config.get('use_temperature_curriculum', True)
+
         # FIX ISSUE #8: Curriculum learning for loss weights
         self.use_curriculum = config.get('use_curriculum', True)
         self.total_steps = config.get('total_steps', 10000)
 
         # Track which losses already emitted non-finite warnings
         self._loss_warnings_printed = set()
+
+        # FIX ISSUE #7: Track loss magnitudes for adaptive balancing
+        self.loss_magnitude_ema = {}
+        self.magnitude_momentum = 0.9
 
     def _sanitize_tensor(self, tensor: Optional[torch.Tensor], name: str,
                           clamp_range: Optional[Tuple[float, float]] = None) -> Optional[torch.Tensor]:
@@ -404,26 +410,34 @@ class StudentAwareDistillationFramework(nn.Module):
         return tensor
 
     def _ensure_finite_loss(self, name: str, value: torch.Tensor) -> torch.Tensor:
+        """FIX ISSUE #3: Improved NaN/Inf detection and handling"""
         if torch.isnan(value) or torch.isinf(value):
             if name not in self._loss_warnings_printed:
-                print(f"[Warning] {name} produced non-finite value ({value.item()}); clamping to zero.")
+                print(f"[Warning] {name} produced non-finite value ({value.item() if value.numel() == 1 else 'tensor'}); clamping to zero.")
                 self._loss_warnings_printed.add(name)
             return torch.zeros_like(value)
+
+        # FIX ISSUE #3: Also check for unreasonably high values that indicate numerical issues
+        if value.item() > 1000.0:
+            if name not in self._loss_warnings_printed:
+                print(f"[Warning] {name} produced very high value ({value.item():.2f}); possible numerical instability.")
+                self._loss_warnings_printed.add(name)
+
         return value
-    
+
     def _kl_on_subset(self, student_logits, teacher_logits, attention_mask, temperature, top_k=256):
         """HIGH-IMPACT OPTIMIZATION: Compute KD on union of top-k tokens only.
-        
+
         Reduces vocab KD compute by 10-100x with negligible quality loss.
         Essential for P100 with large vocabs (student vocab ≈49k).
-        
+
         Args:
             student_logits: [B, L, V]
             teacher_logits: [B, L, V]
             attention_mask: [B, L]
             temperature: float
             top_k: int (e.g., 256)
-            
+
         Returns:
             kd_loss: scalar
         """
@@ -445,15 +459,29 @@ class StudentAwareDistillationFramework(nn.Module):
         kd_raw = F.kl_div(s_logp, t_p, reduction='none').sum(-1)  # [B, L]
         mask = attention_mask[:, :kd_raw.size(1)].to(kd_raw.dtype)
         return (kd_raw * mask).sum() / mask.sum().clamp(min=1.0) * (temperature ** 2)
-    
+
+    def _get_curriculum_temperature(self, step: Optional[int] = None) -> float:
+        """FIX ISSUE #10: Temperature curriculum - start high, gradually reduce
+
+        High temperature (3.0) early: softer targets, easier learning
+        Low temperature (2.0) late: sharper targets, better final performance
+        """
+        if not self.use_temperature_curriculum or step is None:
+            return self.base_temperature
+
+        progress = min(1.0, step / self.total_steps)
+        # Linear annealing from base_temperature to min_temperature
+        temperature = self.base_temperature - (self.base_temperature - self.min_temperature) * progress
+        return temperature
+
     def _get_curriculum_weights(self, step: Optional[int] = None) -> Dict[str, float]:
         """FIX ISSUE #8: Compute curriculum learning weights
-        
+
         Progressive loss introduction:
         - Phase 1 (0-30%): Focus on KD loss only
         - Phase 2 (30-60%): Add attention and feature losses
         - Phase 3 (60-100%): Add all losses
-        
+
         This stabilizes early training and gradually increases task complexity.
         """
         if not self.use_curriculum or step is None:
@@ -464,9 +492,9 @@ class StudentAwareDistillationFramework(nn.Module):
                 'layerwise': self.alpha_layerwise,
                 'contrastive': self.alpha_contrastive
             }
-        
+
         progress = min(1.0, step / self.total_steps)
-        
+
         # Phase transitions
         if progress < 0.3:  # Phase 1: KD only
             phase_progress = progress / 0.3
@@ -495,6 +523,40 @@ class StudentAwareDistillationFramework(nn.Module):
                 'layerwise': self.alpha_layerwise * phase_progress,
                 'contrastive': self.alpha_contrastive * phase_progress
             }
+
+    def _update_loss_magnitude_ema(self, loss_name: str, loss_value: float):
+        """FIX ISSUE #7: Track EMA of loss magnitudes for adaptive balancing"""
+        if loss_name not in self.loss_magnitude_ema:
+            self.loss_magnitude_ema[loss_name] = loss_value
+        else:
+            self.loss_magnitude_ema[loss_name] = (
+                self.magnitude_momentum * self.loss_magnitude_ema[loss_name] +
+                (1 - self.magnitude_momentum) * loss_value
+            )
+
+    def _get_balanced_loss_weight(self, loss_name: str, base_weight: float) -> float:
+        """FIX ISSUE #7: Compute magnitude-balanced weight
+
+        Normalizes loss contributions so each component has similar impact
+        regardless of absolute magnitude.
+        """
+        if not self.loss_magnitude_ema or loss_name not in self.loss_magnitude_ema:
+            return base_weight
+
+        # Get max magnitude for normalization
+        max_magnitude = max(self.loss_magnitude_ema.values())
+        current_magnitude = self.loss_magnitude_ema[loss_name]
+
+        if current_magnitude < 1e-6:
+            return base_weight
+
+        # Scale weight inversely with magnitude
+        balanced_weight = base_weight * (max_magnitude / current_magnitude)
+
+        # Clamp to reasonable range (0.1x to 10x original weight)
+        balanced_weight = max(base_weight * 0.1, min(base_weight * 10.0, balanced_weight))
+
+        return balanced_weight
 
     def _load_teacher_model(self):
         """Load and configure teacher model"""
@@ -559,13 +621,13 @@ class StudentAwareDistillationFramework(nn.Module):
         # CRITICAL FIX #5: Verify gradient checkpointing is properly enabled
         if hasattr(self.student_model, 'gradient_checkpointing_enable'):
             self.student_model.gradient_checkpointing_enable()
-            
+
             # Verify that use_cache is disabled (required for gradient checkpointing)
             if hasattr(self.student_model.config, 'use_cache'):
                 if self.student_model.config.use_cache:
                     print("[Warning] Gradient checkpointing requires use_cache=False, but it's still True!")
                     self.student_model.config.use_cache = False
-            
+
             print("[Info] Gradient checkpointing enabled for student model")
         else:
             print("[Warning] Student model does not support gradient_checkpointing_enable()")
@@ -606,12 +668,12 @@ class StudentAwareDistillationFramework(nn.Module):
                     # This is a MoE layer - extract actual expert outputs
                     moe = layer.block_sparse_moe
                     hidden = outputs.hidden_states[layer_idx]
-                    
+
                     try:
                         # Get hidden state for this layer
                         batch_size, seq_len, hidden_size = hidden.shape
                         hidden_reshaped = hidden.view(-1, hidden_size)
-                        
+
                         # Get routing decisions from gate
                         if hasattr(moe, 'gate'):
                             router_logits = moe.gate(hidden_reshaped)
@@ -619,7 +681,7 @@ class StudentAwareDistillationFramework(nn.Module):
                             # Fallback: use layer output as single expert
                             expert_outputs.append(hidden)
                             continue
-                        
+
                         # Get individual expert outputs if accessible
                         if hasattr(moe, 'experts'):
                             num_experts = len(moe.experts)
@@ -639,14 +701,14 @@ class StudentAwareDistillationFramework(nn.Module):
                     except Exception as e:
                         # Fallback: use the hidden state if expert extraction fails
                         expert_outputs.append(hidden)
-        
+
         # If no experts were extracted, use hidden states from different layers
         if not expert_outputs:
             # Use evenly spaced hidden layers as "pseudo-experts"
             num_layers = len(outputs.hidden_states)
             step = max(1, num_layers // 8)
             expert_outputs = [outputs.hidden_states[i] for i in range(0, num_layers, step)][:8]
-            
+
             # Ensure at least one expert
             if not expert_outputs:
                 expert_outputs = [outputs.hidden_states[-1]]
@@ -739,14 +801,17 @@ class StudentAwareDistillationFramework(nn.Module):
 
         # Initialize losses dictionary
         losses = {}
-        
+
         # FIX ISSUE #8: Get curriculum learning weights
         curriculum_weights = self._get_curriculum_weights(step)
+
+        # FIX ISSUE #10: Get curriculum temperature (annealing)
+        current_temperature = self._get_curriculum_temperature(step)
 
         # 1. KL Divergence Loss (main distillation loss)
         # CRITICAL FIX: Use fast path with teacher hidden states
         teacher_hidden_last = teacher_hidden[-1]  # [B, Lt, Dt]
-        
+
         # Align sequence lengths if needed
         if teacher_hidden_last.size(1) != student_logits.size(1):
             teacher_hidden_last = F.interpolate(
@@ -755,7 +820,7 @@ class StudentAwareDistillationFramework(nn.Module):
                 mode='linear',
                 align_corners=False
             ).transpose(1, 2)
-        
+
         # Project teacher hidden to student vocab logits (avoids O(B·L·Vt·Dt) cost)
         projected_teacher_logits = self.logit_projector(teacher_hidden=teacher_hidden_last)
 
@@ -763,26 +828,26 @@ class StudentAwareDistillationFramework(nn.Module):
         student_logits_fp32 = student_logits.float()
         teacher_logits_fp32 = projected_teacher_logits.float()
 
-        # Clamp logits for stability, especially with mixed precision
-        clamp_min, clamp_max = -30.0, 30.0
+        # FIX ISSUE #4: More aggressive clamping to prevent extreme values
+        clamp_min, clamp_max = -20.0, 20.0  # Reduced from -30/30 to -20/20
         student_logits_clamped = torch.clamp(student_logits_fp32, min=clamp_min, max=clamp_max)
         teacher_logits_clamped = torch.clamp(teacher_logits_fp32, min=clamp_min, max=clamp_max)
 
-        # HIGH-IMPACT OPTIMIZATION: Use subset KD if configured
-        kd_top_k = self.config.get('kd_top_k', 0)
+        # HIGH-IMPACT OPTIMIZATION: Use subset KD if configured (FIX ISSUE #13)
+        kd_top_k = self.config.get('kd_top_k', 256)  # Default to 256 for P100 memory efficiency
         if kd_top_k > 0:
             # Subset KD: 10-100x faster with minimal quality loss
             kd_loss = self._kl_on_subset(
-                student_logits_clamped, 
+                student_logits_clamped,
                 teacher_logits_clamped,
                 student_attention_mask,
-                self.temperature,
+                current_temperature,
                 top_k=kd_top_k
             )
         else:
             # Full vocab KD (original path)
-            student_log_probs = F.log_softmax(student_logits_clamped / self.temperature, dim=-1)
-            teacher_probs_clamped = torch.clamp(projected_teacher_logits / self.temperature, min=clamp_min, max=clamp_max)
+            student_log_probs = F.log_softmax(student_logits_clamped / current_temperature, dim=-1)
+            teacher_probs_clamped = torch.clamp(projected_teacher_logits / current_temperature, min=clamp_min, max=clamp_max)
             teacher_probs = F.softmax(teacher_probs_clamped, dim=-1)
 
             # Ensure teacher_probs don't have NaNs from softmax and remain normalized
@@ -799,11 +864,15 @@ class StudentAwareDistillationFramework(nn.Module):
                 mask = kd_per_token.new_ones(kd_per_token.shape)
 
             masked_kd = (kd_per_token * mask).sum() / mask.sum().clamp(min=1.0)
-            kd_loss = masked_kd * (self.temperature ** 2)
-        
-        # FIX ISSUE #8: Use curriculum weight instead of fixed alpha
-        losses['kd_loss'] = self._ensure_finite_loss('kd_loss', kd_loss * curriculum_weights['kd'])
+            kd_loss = masked_kd * (current_temperature ** 2)
 
+        # FIX ISSUE #7: Track loss magnitude for adaptive balancing
+        self._update_loss_magnitude_ema('kd', kd_loss.item())
+
+        # FIX ISSUE #8: Use curriculum weight instead of fixed alpha
+        weighted_kd = kd_loss * curriculum_weights['kd']
+        losses['kd_loss'] = self._ensure_finite_loss('kd_loss', weighted_kd)
+        
         # 2. Student-aware routing and feature losses
         if len(student_hidden) > 0 and len(teacher_hidden) > 0:
             # Use last hidden state for routing
@@ -896,7 +965,7 @@ class StudentAwareDistillationFramework(nn.Module):
 
     def _chunked_cross_entropy(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """Compute cross entropy in chunks to reduce activation memory footprint.
-        
+
         FIX ISSUE #9: Added label smoothing for better generalization.
         """
         # Shift for causal language modeling (predict next token)
@@ -912,7 +981,7 @@ class StudentAwareDistillationFramework(nn.Module):
         flat_labels = shift_labels.view(-1)
 
         chunk_size = self.loss_chunk_size or flat_logits.size(0)
-        
+
         # FIX ISSUE #9: Use label smoothing (SOTA: 0.1)
         label_smoothing = self.config.get('label_smoothing', 0.1)
 

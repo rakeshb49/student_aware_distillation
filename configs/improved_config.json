@@ -1,0 +1,84 @@
+{
+  "comment": "Improved configuration addressing all 13 identified issues",
+
+  "_comment_models": "Model configuration",
+  "teacher_model": "huihui-ai/Huihui-MoE-1B-A0.6B",
+  "student_model": "HuggingFaceTB/SmolLM-135M",
+  "num_experts": 8,
+  "top_k": 2,
+
+  "_comment_training": "Training configuration - FIX ISSUE #11: Optimized batch/accumulation",
+  "batch_size": 4,
+  "gradient_accumulation_steps": 8,
+  "learning_rate": 3e-5,
+  "router_lr": 1e-4,
+  "num_epochs": 3,
+  "warmup_steps": 1000,
+  "eval_steps": 1000,
+  "save_epochs": 1,
+  "max_length": 384,
+
+  "_comment_loss_weights": "Loss component weights - FIX ISSUE #7: Balanced weights",
+  "alpha_kd": 0.7,
+  "alpha_feature": 0.1,
+  "alpha_attention": 0.1,
+  "alpha_layerwise": 0.05,
+  "alpha_contrastive": 0.05,
+
+  "_comment_distillation": "Distillation settings - FIX ISSUE #10: Temperature curriculum",
+  "temperature": 3.0,
+  "min_temperature": 2.0,
+  "use_temperature_curriculum": true,
+  "contrastive_temp": 0.07,
+  "label_smoothing": 0.1,
+
+  "_comment_curriculum": "Curriculum learning - FIX ISSUE #8: Progressive training",
+  "use_curriculum": true,
+
+  "_comment_router": "Router configuration",
+  "initial_top_k": 1,
+  "final_top_k": 4,
+  "load_balance_weight": 0.01,
+  "noise_std": 0.1,
+
+  "_comment_optimization": "Optimization settings",
+  "weight_decay": 0.01,
+  "max_grad_norm": 1.0,
+  "scheduler_type": "cosine",
+  "use_amp": true,
+  "amp_dtype": "bfloat16",
+  "loss_chunk_size": 128,
+  "attention_layers": 2,
+
+  "_comment_memory": "Memory optimization - FIX ISSUE #6, #11, #13",
+  "kd_top_k": 256,
+  "use_gradient_checkpointing": true,
+
+  "_comment_data": "Data configuration - FIX ISSUE #12",
+  "dataset_subset_size": 50000,
+  "num_workers": 1,
+  "use_dynamic_batching": true,
+
+  "_comment_paths": "Paths",
+  "checkpoint_dir": "./checkpoints",
+  "log_dir": "./logs",
+  "cache_dir": "./cache",
+
+  "_comment_memory_management": "Memory management - FIX ISSUE #6",
+  "memory_threshold": 0.85,
+
+  "_comment_early_stopping": "Early stopping - FIX ISSUE #5: More patient",
+  "use_early_stopping": true,
+  "early_stopping_patience": 10,
+  "early_stopping_min_delta": 0.001,
+
+  "_comment_ema": "Exponential Moving Average - FIX ISSUE #6",
+  "use_ema": true,
+  "ema_decay": 0.9999,
+
+  "_comment_logging": "Logging",
+  "use_wandb": false,
+  "project_name": "student-aware-distillation",
+  "log_component_losses": true,
+  "log_gradient_norms": true
+}

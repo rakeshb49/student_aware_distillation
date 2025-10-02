@@ -20,12 +20,12 @@ import os
 
 class EarlyStopping:
     """Early stopping to halt training when validation metric stops improving"""
-    
-    def __init__(self, patience: int = 3, min_delta: float = 0.01, mode: str = 'min'):
+
+    def __init__(self, patience: int = 10, min_delta: float = 0.001, mode: str = 'min'):
         """
         Args:
-            patience: Number of epochs to wait for improvement
-            min_delta: Minimum change to qualify as improvement
+            patience: Number of epochs to wait for improvement (FIX ISSUE #5: increased from 3 to 10)
+            min_delta: Minimum change to qualify as improvement (FIX ISSUE #5: reduced from 0.01 to 0.001)
             mode: 'min' for metrics that should decrease (loss), 'max' for metrics that should increase
         """
         self.patience = patience
@@ -34,19 +34,19 @@ class EarlyStopping:
         self.counter = 0
         self.best_score = None
         self.early_stop = False
-        
+
     def __call__(self, metric: float) -> bool:
         """
         Check if training should stop
-        
+
         Args:
             metric: Current metric value
-            
+
         Returns:
             True if should stop, False otherwise
         """
         score = -metric if self.mode == 'min' else metric
-        
+
         if self.best_score is None:
             self.best_score = score
         elif score < self.best_score + self.min_delta:
@@ -56,9 +56,9 @@ class EarlyStopping:
         else:
             self.best_score = score
             self.counter = 0
-        
+
         return self.early_stop
-    
+
     def reset(self):
         """Reset early stopping state"""
         self.counter = 0
@@ -80,7 +80,7 @@ class MemoryManager:
             allocated = torch.cuda.memory_allocated() / 1024**3  # GB
             reserved = torch.cuda.memory_reserved() / 1024**3    # GB
             max_memory = torch.cuda.max_memory_allocated() / 1024**3  # GB
-            
+
             # FIX: Use actual GPU memory for accurate usage percentage
             free_b, total_b = torch.cuda.mem_get_info()
             used_b = total_b - free_b
@@ -151,11 +151,11 @@ class GradientAccumulator:
 
 class ModelEMA:
     """FIX ISSUE #6: Exponential Moving Average for model weights
-    
+
     Maintains a moving average of model parameters for more stable checkpoints.
     SOTA practice from papers like MoCo, BYOL, and modern vision transformers.
     """
-    
+
     def __init__(self, model: nn.Module, decay: float = 0.9999, device: Optional[str] = None):
         """
         Args:
@@ -165,13 +165,13 @@ class ModelEMA:
         """
         self.decay = decay
         self.device = device if device else next(model.parameters()).device
-        
+
         # Create shadow parameters
         self.shadow_params = {}
         for name, param in model.named_parameters():
             if param.requires_grad:
                 self.shadow_params[name] = param.data.clone().to(self.device)
-    
+
     def update(self, model: nn.Module):
         """Update EMA parameters"""
         with torch.no_grad():
@@ -180,7 +180,7 @@ class ModelEMA:
                     self.shadow_params[name].mul_(self.decay).add_(
                         param.data.to(self.device), alpha=1 - self.decay
                     )
-    
+
     def apply_shadow(self, model: nn.Module):
         """Apply EMA parameters to model (for evaluation/saving)"""
         backup = {}
@@ -195,20 +195,20 @@ class ModelEMA:
                     # Shape mismatch - skip this parameter
                     print(f"Warning: EMA shape mismatch for {name}: {shadow_param.shape} vs {param.data.shape}")
         return backup
-    
+
     def restore(self, model: nn.Module, backup: Dict):
         """Restore original parameters"""
         for name, param in model.named_parameters():
             if name in backup:
                 param.data.copy_(backup[name])
-    
+
     def state_dict(self):
         """Get EMA state for checkpointing"""
         return {
             'decay': self.decay,
             'shadow_params': self.shadow_params
         }
-    
+
     def load_state_dict(self, state_dict):
         """Load EMA state from checkpoint"""
         self.decay = state_dict.get('decay', self.decay)
@@ -274,13 +274,14 @@ class DistillationTrainer:
         self.memory_manager = MemoryManager(
             threshold=config.get('memory_threshold', 0.9)
         )
-        
+
         # Setup early stopping
         self.use_early_stopping = config.get('use_early_stopping', True)
         if self.use_early_stopping:
+            # FIX ISSUE #5: More patient early stopping (10 instead of 3, 0.001 instead of 0.01)
             self.early_stopping = EarlyStopping(
-                patience=config.get('early_stopping_patience', 3),
-                min_delta=config.get('early_stopping_min_delta', 0.01),
+                patience=config.get('early_stopping_patience', 10),
+                min_delta=config.get('early_stopping_min_delta', 0.001),
                 mode='min'  # For loss/perplexity
             )
         else:
@@ -291,12 +292,12 @@ class DistillationTrainer:
 
         # Setup scheduler
         self.scheduler = self._create_scheduler()
-        
+
         # FIX ISSUE #6: Setup EMA for model weights
         self.use_ema = config.get('use_ema', True)
         if self.use_ema:
             self.ema = ModelEMA(
-                self.model, 
+                self.model,
                 decay=config.get('ema_decay', 0.9999),
                 device=self.device
             )
@@ -415,6 +416,10 @@ class DistillationTrainer:
             'routing': []
         }
 
+        # FIX ISSUE #1: Initialize epoch_metrics early to avoid UnboundLocalError
+        epoch_metrics = {}
+        early_stop_triggered = False
+
         progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {self.epoch}")
 
         for batch_idx, batch in enumerate(progress_bar):
@@ -478,11 +483,11 @@ class DistillationTrainer:
                         self.optimizer.step()
                     # FIX ISSUE #2: Use set_to_none=True for better memory efficiency
                     self.optimizer.zero_grad(set_to_none=True)
-                    
+
                     # FIX ISSUE #6: Update EMA after optimizer step
                     if self.ema is not None:
                         self.ema.update(self.model)
-                    
+
                     # CRITICAL FIX: Scheduler should step only when optimizer steps
                     if self.scheduler is not None:
                         self.scheduler.step()
@@ -509,11 +514,11 @@ class DistillationTrainer:
                     self.optimizer.step()
                     # FIX ISSUE #2: Use set_to_none=True for better memory efficiency
                     self.optimizer.zero_grad(set_to_none=True)
-                    
+
                     # FIX ISSUE #6: Update EMA after optimizer step
                     if self.ema is not None:
                         self.ema.update(self.model)
-                    
+
                     # CRITICAL FIX: Scheduler should step only when optimizer steps
                     if self.scheduler is not None:
                         self.scheduler.step()
@@ -525,6 +530,17 @@ class DistillationTrainer:
                 if key not in epoch_losses:
                     epoch_losses[key] = []
                 epoch_losses[key].append(loss_value.item())
+
+            # FIX ISSUE #8: Monitor gradient norms
+            if self.gradient_accumulator.should_step() and batch_idx % 100 == 0:
+                total_norm = 0.0
+                for p in self.model.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                total_norm = total_norm ** 0.5
+                if total_norm > 10.0:
+                    print(f"\n[Warning] High gradient norm: {total_norm:.4f}")
 
             # Update progress bar
             avg_loss = np.mean(epoch_losses['total'][-100:])  # Running average
@@ -541,18 +557,22 @@ class DistillationTrainer:
             if self.eval_dataloader and self.global_step % self.config.get('eval_steps', 500) == 0:
                 eval_metrics = self.evaluate()
                 self.model.train()  # Back to training mode
-                
-                # CRITICAL FIX #4: Check early stopping mid-epoch
+
+                # FIX ISSUE #1: Check early stopping mid-epoch using flag
                 if eval_metrics.get('early_stop', False):
                     print(f"\n[Early Stop] Triggered at step {self.global_step} (mid-epoch)")
-                    epoch_metrics['early_stop'] = True
+                    early_stop_triggered = True
                     break  # Exit epoch early
 
         # Compute epoch metrics
-        epoch_metrics = {
+        epoch_metrics.update({
             f'train_{key}': np.mean(values)
             for key, values in epoch_losses.items() if values
-        }
+        })
+
+        # FIX ISSUE #1: Add early stop flag after metrics are computed
+        if early_stop_triggered:
+            epoch_metrics['early_stop'] = True
 
         # CRITICAL FIX #3: Log metrics to tracker if available
         if self.metrics_tracker is not None:
@@ -564,6 +584,13 @@ class DistillationTrainer:
                 step=self.global_step
             )
 
+        # FIX ISSUE #8: Print component loss breakdown
+        component_losses = {k: v for k, v in epoch_metrics.items() if k.startswith('train_') and k != 'train_total'}
+        if component_losses:
+            print(f"\n[Train] Component losses:")
+            for key, value in component_losses.items():
+                print(f"  {key}: {value:.4f}")
+
         return epoch_metrics
 
     @torch.no_grad()
@@ -574,7 +601,15 @@ class DistillationTrainer:
 
         self.model.eval()
         eval_losses = []
-        
+
+        # FIX ISSUE #8: Track component losses during evaluation
+        eval_component_losses = {
+            'kd': [],
+            'feature': [],
+            'attention': [],
+            'routing': []
+        }
+
         # FIX ISSUE #6: Use EMA weights for evaluation if available
         ema_backup = None
         if self.ema is not None:
@@ -612,6 +647,12 @@ class DistillationTrainer:
 
             eval_losses.append(outputs['loss'].item())
 
+            # FIX ISSUE #8: Track component losses
+            for loss_name, loss_value in outputs.get('losses', {}).items():
+                key = loss_name.replace('_loss', '').replace('routing_', '')
+                if key in eval_component_losses:
+                    eval_component_losses[key].append(loss_value.item())
+
             # Print progress every 10% or every 20 batches, whichever is more frequent
             progress_interval = max(1, min(20, total_batches // 10))
             if (batch_idx + 1) % progress_interval == 0 or (batch_idx + 1) == total_batches:
@@ -622,16 +663,28 @@ class DistillationTrainer:
 
         eval_loss = np.mean(eval_losses)
 
-        # Calculate perplexity
-        perplexity = np.exp(eval_loss)
+        # FIX ISSUE #2: Calculate perplexity with overflow protection
+        perplexity = np.exp(min(eval_loss, 20.0))  # Cap at exp(20) ≈ 485M
+        if eval_loss > 20.0:
+            print(f"[Warning] Loss {eval_loss:.2f} too high for meaningful perplexity (capped at 20)")
 
         metrics = {
             'eval_loss': eval_loss,
             'eval_perplexity': perplexity
         }
 
+        # FIX ISSUE #8: Add component losses to metrics
+        for key, values in eval_component_losses.items():
+            if values:
+                metrics[f'eval_{key}_loss'] = np.mean(values)
+
         print(f"[Eval] loss: {metrics['eval_loss']:.4f}, ppl: {metrics['eval_perplexity']:.2f}")
-        
+
+        # FIX ISSUE #8: Print component losses
+        component_str = ", ".join([f"{k}: {v:.4f}" for k, v in metrics.items() if k.startswith('eval_') and k not in ['eval_loss', 'eval_perplexity']])
+        if component_str:
+            print(f"[Eval] components: {component_str}")
+
         # FIX ISSUE #6: Restore original weights after evaluation with EMA
         if ema_backup is not None:
             self.ema.restore(self.model, ema_backup)
@@ -648,7 +701,7 @@ class DistillationTrainer:
         if eval_loss < self.best_eval_loss:
             self.best_eval_loss = eval_loss
             self.save_checkpoint(best=True)
-        
+
         # Check early stopping
         if self.early_stopping is not None:
             if self.early_stopping(eval_loss):
@@ -681,7 +734,7 @@ class DistillationTrainer:
             if self.eval_dataloader:
                 eval_metrics = self.evaluate()
                 epoch_metrics.update(eval_metrics)
-                
+
                 # Check early stopping
                 if eval_metrics.get('early_stop', False):
                     print("\nEarly stopping triggered. Training halted.")
@@ -734,15 +787,15 @@ class DistillationTrainer:
             'model_state_dict': model_state,  # Save framework weights
             'config': self.config
         }
-        
+
         # Add scaler state if using mixed precision
         if self.scaler is not None:
             checkpoint_state['scaler_state_dict'] = self.scaler.state_dict()
-        
+
         # FIX ISSUE #6: Add EMA state to checkpoint
         if self.ema is not None:
             checkpoint_state['ema_state_dict'] = self.ema.state_dict()
-        
+
         torch.save(checkpoint_state, os.path.join(path, 'training_state.pt'))
 
         print(f"Checkpoint saved to {path}")
@@ -753,7 +806,7 @@ class DistillationTrainer:
         try:
             from transformers import AutoModelForCausalLM
             student_model = AutoModelForCausalLM.from_pretrained(
-                path, 
+                path,
                 trust_remote_code=True,
                 torch_dtype=torch.float32  # Keep student in fp32 for AMP
             )
@@ -762,7 +815,7 @@ class DistillationTrainer:
             print("Restored student model weights from saved directory.")
         except Exception as e:
             print(f"Warning: could not restore student model from {path}: {e}")
-        
+
         # Load training state
         state_path = os.path.join(path, 'training_state.pt')
         if os.path.exists(state_path):
@@ -773,7 +826,7 @@ class DistillationTrainer:
             if self.scheduler and state.get('scheduler_state_dict'):
                 self.scheduler.load_state_dict(state['scheduler_state_dict'])
             self.best_eval_loss = state.get('best_eval_loss', float('inf'))
-            
+
             # CRITICAL FIX: Restore framework weights (router, projectors, etc.)
             if 'model_state_dict' in state:
                 missing, unexpected = self.model.load_state_dict(state['model_state_dict'], strict=False)
@@ -781,17 +834,17 @@ class DistillationTrainer:
                     print(f"Model state restored with missing={len(missing)}, unexpected={len(unexpected)}")
                 else:
                     print("Model state fully restored")
-            
+
             # FIX ISSUE #1: Restore gradient accumulator state
             if 'gradient_accumulator_step_count' in state:
                 self.gradient_accumulator.step_count = state['gradient_accumulator_step_count']
                 print(f"Restored gradient accumulator step count: {self.gradient_accumulator.step_count}")
-            
+
             # Restore scaler state if present
             if self.scaler is not None and 'scaler_state_dict' in state:
                 self.scaler.load_state_dict(state['scaler_state_dict'])
                 print(f"Restored gradient scaler state")
-            
+
             # FIX ISSUE #6: Restore EMA state if present
             if self.ema is not None and 'ema_state_dict' in state:
                 self.ema.load_state_dict(state['ema_state_dict'])
@@ -803,7 +856,7 @@ class DistillationTrainer:
 
 def create_trainer(model, config, train_dataloader, eval_dataloader=None, metrics_tracker=None):
     """Factory function to create a trainer
-    
+
     Args:
         model: Distillation framework model
         config: Training configuration
