@@ -831,8 +831,9 @@ class StudentAwareDistillationFramework(nn.Module):
         # FIX ISSUE #8: Get curriculum learning weights
         curriculum_weights = self._get_curriculum_weights(step)
 
-        # PRIORITY 2 FIX: Reduce logging spam - only log every 100 steps
-        if step is not None and step % 100 == 0:
+        # PRIORITY 2 FIX: Reduce logging spam - only log every 100 steps during training
+        # CRITICAL FIX: Suppress logging during evaluation (model.training == False)
+        if self.training and step is not None and step % 100 == 0:
             progress_pct = (step / self.total_steps) * 100 if self.total_steps > 0 else 0
             print(f"\n[CURRICULUM] Step {step} ({progress_pct:.1f}%): "
                   f"kd={curriculum_weights['kd']:.3f}, "
@@ -909,8 +910,8 @@ class StudentAwareDistillationFramework(nn.Module):
         weighted_kd = kd_loss * curriculum_weights['kd']
         losses['kd_loss'] = self._ensure_finite_loss('kd_loss', weighted_kd)
 
-        # PRIORITY 2 FIX: Reduce logging spam - only log every 100 steps
-        if step is not None and step % 100 == 0:
+        # PRIORITY 2 FIX: Reduce logging spam - only log every 100 steps during training
+        if self.training and step is not None and step % 100 == 0:
             print(f"[KD] Raw: {kd_loss.item():.4f}, Weight: {curriculum_weights['kd']:.3f}, "
                   f"Weighted: {weighted_kd.item():.4f}")
 
@@ -940,17 +941,16 @@ class StudentAwareDistillationFramework(nn.Module):
                 scaled = self._ensure_finite_loss(f'routing_{loss_name}', loss_value * weight)
                 losses[f'routing_{loss_name}'] = scaled
 
-            # PRIORITY 2 FIX: Reduce logging spam - only log every 100 steps
-            if step is not None and step % 100 == 0:
+            # PRIORITY 2 FIX: Reduce logging spam - only log every 100 steps during training
+            if self.training and step is not None and step % 100 == 0:
                 for loss_name, loss_value in routing_outputs['losses'].items():
                     raw_val = loss_value.item()
                     if loss_name == 'attention_alignment_loss':
                         weight = curriculum_weights['attention']
                     else:
                         weight = curriculum_weights['feature']
-                    scaled_val = raw_val * weight
-                    print(f"[ROUTING] {loss_name}: Raw={raw_val:.4f}, "
-                          f"Weight={weight:.3f}, Scaled={scaled_val:.4f}")
+                    scaled_val = losses[f'routing_{loss_name}'].item()
+                    print(f"[ROUTING] {loss_name}: Raw={raw_val:.4f}, Weight={weight:.3f}, Scaled={scaled_val:.4f}")
 
         # 3. Attention transfer loss
         if student_attention and teacher_attention and self.alpha_attention > 0:
@@ -1007,7 +1007,7 @@ class StudentAwareDistillationFramework(nn.Module):
             losses['lm_loss'] = self._ensure_finite_loss('lm_loss', lm_loss * lm_weight)
 
             # Log LM loss periodically to ensure it's being tracked
-            if step is not None and step % 100 == 0:
+            if self.training and step is not None and step % 100 == 0:
                 print(f"[LM] Raw: {lm_loss.item():.4f}, Weight: {lm_weight:.3f}, "
                       f"Weighted: {(lm_loss * lm_weight).item():.4f}")
 
@@ -1016,7 +1016,7 @@ class StudentAwareDistillationFramework(nn.Module):
         total_loss = self._ensure_finite_loss('total_loss', total_loss)
 
         # Log total loss summary periodically
-        if step is not None and step % 100 == 0:
+        if self.training and step is not None and step % 100 == 0:
             print(f"[TOTAL] Loss: {total_loss.item():.4f}, Components: {len(losses)}")
 
         return {
