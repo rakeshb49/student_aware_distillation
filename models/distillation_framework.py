@@ -161,11 +161,15 @@ class AttentionTransferModule(nn.Module):
         teacher_attn_soft = F.softmax(teacher_attn, dim=-1)
 
         # KL divergence loss
-        loss = F.kl_div(
+        # PRIORITY 2 FIX: Normalize by sequence length to prevent astronomical values (90-140)
+        raw_loss = F.kl_div(
             student_attn_log,
             teacher_attn_soft,
             reduction='batchmean'
         ) * (self.temperature ** 2)
+
+        # Normalize by sequence length to get per-token loss
+        loss = raw_loss / seq_len
 
         return loss
 
@@ -363,6 +367,10 @@ class StudentAwareDistillationFramework(nn.Module):
             student_dim=self.student_dim
         )
 
+        # PRIORITY 1 FIX: Convert logit_projector to teacher's dtype to avoid dtype mismatch
+        # Teacher is in float16, but projector is initialized in float32
+        self.logit_projector = self.logit_projector.to(self.teacher_model.dtype)
+
         # Store pad token id (used for masking losses)
         tokenizer = config.get('student_tokenizer')
         pad_token_id = getattr(tokenizer, 'pad_token_id', None) if tokenizer is not None else None
@@ -475,14 +483,15 @@ class StudentAwareDistillationFramework(nn.Module):
         return temperature
 
     def _get_curriculum_weights(self, step: Optional[int] = None) -> Dict[str, float]:
-        """FIX ISSUE #8: Compute curriculum learning weights
+        """PRIORITY 2 FIX: More aggressive curriculum learning with linear ramp-up
 
-        Progressive loss introduction:
-        - Phase 1 (0-30%): Focus on KD loss only
-        - Phase 2 (30-60%): Add attention and feature losses
-        - Phase 3 (60-100%): Add all losses
+        Progressive loss introduction with faster ramp-up:
+        - 0-10%: KD only (warmup)
+        - 10-40%: Linear ramp-up of feature and attention losses
+        - 40-70%: Linear ramp-up of layerwise loss
+        - 70-100%: Linear ramp-up of contrastive loss
 
-        This stabilizes early training and gradually increases task complexity.
+        At 50% progress, feature/attention are at ~83% of max weight (not 6.7%)
         """
         if not self.use_curriculum or step is None:
             return {
@@ -495,34 +504,45 @@ class StudentAwareDistillationFramework(nn.Module):
 
         progress = min(1.0, step / self.total_steps)
 
-        # Phase transitions
-        if progress < 0.3:  # Phase 1: KD only
-            phase_progress = progress / 0.3
-            return {
-                'kd': self.alpha_kd,
-                'feature': 0.0,
-                'attention': 0.0,
-                'layerwise': 0.0,
-                'contrastive': 0.0
-            }
-        elif progress < 0.6:  # Phase 2: Add attention and feature
-            phase_progress = (progress - 0.3) / 0.3
-            return {
-                'kd': self.alpha_kd,
-                'feature': self.alpha_feature * phase_progress,
-                'attention': self.alpha_attention * phase_progress,
-                'layerwise': 0.0,
-                'contrastive': 0.0
-            }
-        else:  # Phase 3: All losses
-            phase_progress = (progress - 0.6) / 0.4
-            return {
-                'kd': self.alpha_kd,
-                'feature': self.alpha_feature,
-                'attention': self.alpha_attention,
-                'layerwise': self.alpha_layerwise * phase_progress,
-                'contrastive': self.alpha_contrastive * phase_progress
-            }
+        # Linear ramp-up for each loss component
+        # KD loss: Always at full weight
+        kd_weight = self.alpha_kd
+
+        # Feature and attention: Ramp from 10% to 40% progress
+        if progress < 0.1:
+            feature_weight = 0.0
+            attention_weight = 0.0
+        elif progress < 0.4:
+            ramp = (progress - 0.1) / 0.3  # 0 to 1 over 10%-40%
+            feature_weight = self.alpha_feature * ramp
+            attention_weight = self.alpha_attention * ramp
+        else:
+            feature_weight = self.alpha_feature
+            attention_weight = self.alpha_attention
+
+        # Layerwise: Ramp from 40% to 70% progress
+        if progress < 0.4:
+            layerwise_weight = 0.0
+        elif progress < 0.7:
+            ramp = (progress - 0.4) / 0.3  # 0 to 1 over 40%-70%
+            layerwise_weight = self.alpha_layerwise * ramp
+        else:
+            layerwise_weight = self.alpha_layerwise
+
+        # Contrastive: Ramp from 70% to 100% progress
+        if progress < 0.7:
+            contrastive_weight = 0.0
+        else:
+            ramp = (progress - 0.7) / 0.3  # 0 to 1 over 70%-100%
+            contrastive_weight = self.alpha_contrastive * ramp
+
+        return {
+            'kd': kd_weight,
+            'feature': feature_weight,
+            'attention': attention_weight,
+            'layerwise': layerwise_weight,
+            'contrastive': contrastive_weight
+        }
 
     def _update_loss_magnitude_ema(self, loss_name: str, loss_value: float):
         """FIX ISSUE #7: Track EMA of loss magnitudes for adaptive balancing"""
@@ -805,16 +825,15 @@ class StudentAwareDistillationFramework(nn.Module):
         # FIX ISSUE #8: Get curriculum learning weights
         curriculum_weights = self._get_curriculum_weights(step)
 
-        # DEBUG: Log curriculum weights periodically
-        if step is not None and (step % 500 == 0 or step < 10):
+        # PRIORITY 2 FIX: Reduce logging spam - only log every 100 steps
+        if step is not None and (step % 100 == 0 or step < 5):
             progress_pct = (step / self.total_steps) * 100 if self.total_steps > 0 else 0
-            print(f"\n{'='*60}")
-            print(f"[CURRICULUM] Step {step}, Progress {progress_pct:.1f}%")
-            print(f"{'='*60}")
-            print(f"  Curriculum weights:")
-            for k, v in curriculum_weights.items():
-                print(f"    {k}: {v:.4f}")
-            print(f"{'='*60}\n")
+            print(f"\n[CURRICULUM] Step {step} ({progress_pct:.1f}%): "
+                  f"kd={curriculum_weights['kd']:.3f}, "
+                  f"feat={curriculum_weights['feature']:.3f}, "
+                  f"attn={curriculum_weights['attention']:.3f}, "
+                  f"layer={curriculum_weights['layerwise']:.3f}, "
+                  f"contr={curriculum_weights['contrastive']:.3f}")
 
         # FIX ISSUE #10: Get curriculum temperature (annealing)
         current_temperature = self._get_curriculum_temperature(step)
@@ -884,15 +903,10 @@ class StudentAwareDistillationFramework(nn.Module):
         weighted_kd = kd_loss * curriculum_weights['kd']
         losses['kd_loss'] = self._ensure_finite_loss('kd_loss', weighted_kd)
 
-        # DEBUG: Log KD loss details
-        if step is not None and (step % 500 == 0 or step < 10):
-            print(f"\n{'='*60}")
-            print(f"[KD LOSS] Step {step}")
-            print(f"{'='*60}")
-            print(f"  Raw KD loss: {kd_loss.item():.4f}")
-            print(f"  Curriculum weight: {curriculum_weights['kd']:.4f}")
-            print(f"  Weighted KD loss: {weighted_kd.item():.4f}")
-            print(f"{'='*60}\n")
+        # PRIORITY 2 FIX: Reduce logging spam - only log every 100 steps
+        if step is not None and step % 100 == 0:
+            print(f"[KD] Raw: {kd_loss.item():.4f}, Weight: {curriculum_weights['kd']:.3f}, "
+                  f"Weighted: {weighted_kd.item():.4f}")
 
         # 2. Student-aware routing and feature losses
         if len(student_hidden) > 0 and len(teacher_hidden) > 0:
@@ -920,11 +934,8 @@ class StudentAwareDistillationFramework(nn.Module):
                 scaled = self._ensure_finite_loss(f'routing_{loss_name}', loss_value * weight)
                 losses[f'routing_{loss_name}'] = scaled
 
-            # DEBUG: Log routing losses details
-            if step is not None and (step % 500 == 0 or step < 10):
-                print(f"\n{'='*60}")
-                print(f"[ROUTING LOSSES] Step {step}")
-                print(f"{'='*60}")
+            # PRIORITY 2 FIX: Reduce logging spam - only log every 100 steps
+            if step is not None and step % 100 == 0:
                 for loss_name, loss_value in routing_outputs['losses'].items():
                     raw_val = loss_value.item()
                     if loss_name == 'attention_alignment_loss':
@@ -932,11 +943,8 @@ class StudentAwareDistillationFramework(nn.Module):
                     else:
                         weight = curriculum_weights['feature']
                     scaled_val = raw_val * weight
-                    print(f"  {loss_name}:")
-                    print(f"    Raw: {raw_val:.4f}")
-                    print(f"    Weight: {weight:.4f}")
-                    print(f"    Scaled: {scaled_val:.4f}")
-                print(f"{'='*60}\n")
+                    print(f"[ROUTING] {loss_name}: Raw={raw_val:.4f}, "
+                          f"Weight={weight:.3f}, Scaled={scaled_val:.4f}")
 
         # 3. Attention transfer loss
         if student_attention and teacher_attention and self.alpha_attention > 0:
@@ -986,13 +994,24 @@ class StudentAwareDistillationFramework(nn.Module):
             losses['contrastive_loss'] = self._ensure_finite_loss('contrastive_loss', contrastive_loss * curriculum_weights['contrastive'])
 
         # 6. Language modeling loss (if labels provided)
+        # PRIORITY 2 FIX: Always compute LM loss if labels are provided and log it
         if labels is not None:
             lm_loss = self._chunked_cross_entropy(student_logits, labels)
-            losses['lm_loss'] = self._ensure_finite_loss('lm_loss', lm_loss * (1 - self.alpha_kd))
+            lm_weight = (1 - self.alpha_kd)
+            losses['lm_loss'] = self._ensure_finite_loss('lm_loss', lm_loss * lm_weight)
+
+            # Log LM loss periodically to ensure it's being tracked
+            if step is not None and step % 100 == 0:
+                print(f"[LM] Raw: {lm_loss.item():.4f}, Weight: {lm_weight:.3f}, "
+                      f"Weighted: {(lm_loss * lm_weight).item():.4f}")
 
         # Compute total loss
         total_loss = sum(losses.values())
         total_loss = self._ensure_finite_loss('total_loss', total_loss)
+
+        # Log total loss summary periodically
+        if step is not None and step % 100 == 0:
+            print(f"[TOTAL] Loss: {total_loss.item():.4f}, Components: {len(losses)}")
 
         return {
             'loss': total_loss,

@@ -46,11 +46,11 @@ class StudentCapacityEstimator(nn.Module):
 
         # Adaptive temperature for capacity-aware routing
         self.temperature = nn.Parameter(torch.ones(1) * 0.5)
-        
+
         # Track historical capacity metrics for trend analysis
         self.register_buffer('capacity_history', torch.zeros(history_size, num_experts))
         self.register_buffer('history_ptr', torch.zeros(1, dtype=torch.long))
-        
+
         # Capacity trend analyzer using GRU
         self.trend_analyzer = nn.GRU(
             input_size=num_experts,
@@ -106,14 +106,14 @@ class StudentCapacityEstimator(nn.Module):
             gap_scores = torch.nan_to_num(gap_scores, nan=0.0, posinf=0.0, neginf=0.0)
             gap_scores = F.softmax(gap_scores, dim=-1)
             gap_scores = torch.nan_to_num(gap_scores, nan=0.0, posinf=0.0, neginf=0.0)
-        
+
         # Update capacity history (moving average across batch and sequence)
         if self.training:
             capacity_avg = capacity_scores.mean(dim=[0, 1]).detach()  # [num_experts]
             ptr = self.history_ptr.item()
             self.capacity_history[ptr] = capacity_avg
             self.history_ptr[0] = (ptr + 1) % self.history_size
-        
+
         # Analyze trend to assess student learning progress
         capacity_trend = None
         if self.history_ptr.item() > 10:  # Need some history
@@ -346,11 +346,11 @@ class AdaptiveExpertRouter(nn.Module):
                 pad_size = actual_experts - routing_weights.size(-1)
                 padding = torch.zeros(
                     *routing_weights.shape[:-1], pad_size,
-                    device=routing_weights.device, 
+                    device=routing_weights.device,
                     dtype=routing_weights.dtype
                 )
                 routing_weights = torch.cat([routing_weights, padding], dim=-1)
-            
+
             # Re-normalize
             routing_weights = routing_weights / (routing_weights.sum(dim=-1, keepdim=True) + 1e-8)
 
@@ -492,7 +492,11 @@ class StudentAwareDistillationRouter(nn.Module):
         teacher_compressed = self.teacher_compressor(routed_knowledge)
 
         # Compute alignment losses
-        feature_loss = F.mse_loss(student_projected, routed_knowledge)
+        # PRIORITY 2 FIX: Normalize feature loss by hidden dimension to prevent astronomical values
+        # Raw MSE can be 150-200, normalize to 0-10 range
+        raw_feature_loss = F.mse_loss(student_projected, routed_knowledge, reduction='mean')
+        # Normalize by hidden dimension (teacher_dim) to get per-dimension loss
+        feature_loss = raw_feature_loss / self.config['teacher_dim']
 
         outputs = {
             'routed_knowledge': routed_knowledge,

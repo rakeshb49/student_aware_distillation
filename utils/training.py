@@ -21,30 +21,46 @@ import os
 class EarlyStopping:
     """Early stopping to halt training when validation metric stops improving"""
 
-    def __init__(self, patience: int = 10, min_delta: float = 0.001, mode: str = 'min'):
+    def __init__(self, patience: int = 20, min_delta: float = 0.001, mode: str = 'min', warmup_steps: int = 1000):
         """
         Args:
-            patience: Number of epochs to wait for improvement (FIX ISSUE #5: increased from 3 to 10)
-            min_delta: Minimum change to qualify as improvement (FIX ISSUE #5: reduced from 0.01 to 0.001)
+            patience: Number of evaluations to wait for improvement (PRIORITY 3 FIX: increased from 10 to 20)
+            min_delta: Minimum change to qualify as improvement
             mode: 'min' for metrics that should decrease (loss), 'max' for metrics that should increase
+            warmup_steps: Number of training steps before early stopping is active (PRIORITY 3 FIX: new parameter)
         """
         self.patience = patience
         self.min_delta = min_delta
         self.mode = mode
+        self.warmup_steps = warmup_steps
         self.counter = 0
         self.best_score = None
         self.early_stop = False
+        self.current_step = 0
 
-    def __call__(self, metric: float) -> bool:
+    def __call__(self, metric: float, current_step: int = None) -> bool:
         """
         Check if training should stop
 
         Args:
             metric: Current metric value
+            current_step: Current training step (for warmup period)
 
         Returns:
             True if should stop, False otherwise
         """
+        # PRIORITY 3 FIX: Track current step for warmup period
+        if current_step is not None:
+            self.current_step = current_step
+
+        # PRIORITY 3 FIX: Don't apply early stopping during warmup
+        if self.current_step < self.warmup_steps:
+            # Still track best score during warmup
+            score = -metric if self.mode == 'min' else metric
+            if self.best_score is None or score > self.best_score + self.min_delta:
+                self.best_score = score
+            return False
+
         score = -metric if self.mode == 'min' else metric
 
         if self.best_score is None:
@@ -64,6 +80,7 @@ class EarlyStopping:
         self.counter = 0
         self.best_score = None
         self.early_stop = False
+        self.current_step = 0
 
 
 class MemoryManager:
@@ -278,11 +295,12 @@ class DistillationTrainer:
         # Setup early stopping
         self.use_early_stopping = config.get('use_early_stopping', True)
         if self.use_early_stopping:
-            # FIX ISSUE #5: More patient early stopping (10 instead of 3, 0.001 instead of 0.01)
+            # PRIORITY 3 FIX: More patient early stopping (20 instead of 10) with warmup period
             self.early_stopping = EarlyStopping(
-                patience=config.get('early_stopping_patience', 10),
+                patience=config.get('early_stopping_patience', 20),
                 min_delta=config.get('early_stopping_min_delta', 0.001),
-                mode='min'  # For loss/perplexity
+                mode='min',  # For loss/perplexity
+                warmup_steps=config.get('early_stopping_warmup', 1000)
             )
         else:
             self.early_stopping = None
@@ -733,8 +751,10 @@ class DistillationTrainer:
 
         # Check early stopping
         if self.early_stopping is not None:
-            if self.early_stopping(eval_loss):
+            # PRIORITY 3 FIX: Pass current_step to early stopping for warmup awareness
+            if self.early_stopping(eval_loss, current_step=self.global_step):
                 print(f"\n[Early Stopping] No improvement for {self.early_stopping.patience} evaluations. Stopping training.")
+                print(f"[Early Stopping] Best score: {-self.early_stopping.best_score:.4f}, Counter: {self.early_stopping.counter}")
                 metrics['early_stop'] = True
 
         return metrics
