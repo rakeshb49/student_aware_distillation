@@ -42,6 +42,12 @@ class TeacherToStudentLogitProjector(nn.Module):
 
         self.hidden_projector = nn.Linear(teacher_dim, student_dim)
 
+        # CRITICAL FIX: Initialize with small weights for stable early training
+        # Default initialization causes high initial KL divergence (9+)
+        # Small weights (0.01) give reasonable initial projections
+        nn.init.normal_(self.hidden_projector.weight, mean=0.0, std=0.01)
+        nn.init.zeros_(self.hidden_projector.bias)
+
     def forward(self,
                 teacher_probs: torch.Tensor = None,
                 teacher_hidden: torch.Tensor = None) -> torch.Tensor:
@@ -494,12 +500,12 @@ class StudentAwareDistillationFramework(nn.Module):
         """PRIORITY 2 FIX: More aggressive curriculum learning with linear ramp-up
 
         Progressive loss introduction with faster ramp-up:
-        - 0-10%: KD only (warmup)
+        - 0-20%: KD warmup (0.1 → 0.7) - gives logit projector time to learn
         - 10-40%: Linear ramp-up of feature and attention losses
         - 40-70%: Linear ramp-up of layerwise loss
         - 70-100%: Linear ramp-up of contrastive loss
 
-        At 50% progress, feature/attention are at ~83% of max weight (not 6.7%)
+        CRITICAL FIX: KD now starts at 0.1 instead of 0.7 to allow logit projector to warm up
         """
         if not self.use_curriculum or step is None:
             return {
@@ -513,8 +519,14 @@ class StudentAwareDistillationFramework(nn.Module):
         progress = min(1.0, step / self.total_steps)
 
         # Linear ramp-up for each loss component
-        # KD loss: Always at full weight
-        kd_weight = self.alpha_kd
+        # CRITICAL FIX: KD loss warmup from 0.1 to 0.7 over first 20%
+        # This gives the logit projector time to learn meaningful mappings
+        if progress < 0.2:
+            # Ramp from 0.1 to full weight over first 20%
+            ramp = progress / 0.2  # 0 to 1 over 0%-20%
+            kd_weight = 0.1 + (self.alpha_kd - 0.1) * ramp
+        else:
+            kd_weight = self.alpha_kd
 
         # Feature and attention: Ramp from 10% to 40% progress
         if progress < 0.1:

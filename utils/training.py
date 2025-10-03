@@ -340,6 +340,7 @@ class DistillationTrainer:
 
         student_params = []
         router_params = []
+        projector_params = []
         aux_params = []
 
         for name, param in self.model.named_parameters():
@@ -349,6 +350,9 @@ class DistillationTrainer:
                 student_params.append((name, param))
             elif "router" in name:
                 router_params.append((name, param))
+            elif "logit_projector" in name:
+                # CRITICAL FIX: Separate learning rate for logit projector
+                projector_params.append((name, param))
             else:
                 aux_params.append((name, param))
 
@@ -378,6 +382,12 @@ class DistillationTrainer:
         )
         optimizer_grouped_parameters.extend(
             build_groups(router_params, self.config.get('router_lr', 1e-4))
+        )
+        # CRITICAL FIX: Higher learning rate for logit projector (5x base LR)
+        # Projector needs to learn fast to map teacher hidden states to student vocab
+        projector_lr = self.config.get('projector_lr', self.config.get('learning_rate', 5e-5) * 5)
+        optimizer_grouped_parameters.extend(
+            build_groups(projector_params, projector_lr)
         )
         aux_lr = self.config.get('aux_lr', self.config.get('learning_rate', 5e-5))
         optimizer_grouped_parameters.extend(
