@@ -245,12 +245,23 @@ class DistillationEvaluator:
                                       dtype=teacher_logits.dtype)
                     aligned_teacher_logits = torch.cat([teacher_logits, pad], dim=-1)
 
+            # CRITICAL FIX: Align sequence lengths before KL divergence
+            # Student and teacher may have different sequence lengths due to different tokenizers
+            student_seq_len = student_logits.size(1)
+            teacher_seq_len = aligned_teacher_logits.size(1)
+
+            if student_seq_len != teacher_seq_len:
+                # Truncate to minimum length to ensure alignment
+                min_seq_len = min(student_seq_len, teacher_seq_len)
+                student_logits = student_logits[:, :min_seq_len, :]
+                aligned_teacher_logits = aligned_teacher_logits[:, :min_seq_len, :]
+
             student_log_probs = F.log_softmax(student_logits, dim=-1)
             teacher_probs = F.softmax(aligned_teacher_logits, dim=-1)
             kl_div = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean')
             total_kl_div += kl_div.item()
 
-            # Compute top-k overlap
+            # Compute top-k overlap (using aligned sequences)
             teacher_topk = torch.topk(aligned_teacher_logits, k=top_k, dim=-1).indices
             student_topk = torch.topk(student_logits, k=top_k, dim=-1).indices
 

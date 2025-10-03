@@ -230,7 +230,7 @@ class LayerwiseDistillationLoss(nn.Module):
             teacher_hidden_states: List of [batch_size, seq_len, teacher_dim]
 
         Returns:
-            layer_loss: Scalar tensor
+            layer_loss: Scalar tensor (normalized)
         """
         total_loss = 0.0
         weights = F.softmax(self.layer_weights, dim=0)
@@ -249,7 +249,13 @@ class LayerwiseDistillationLoss(nn.Module):
                 ).transpose(1, 2)
 
             # Compute MSE loss for this layer pair
-            layer_loss = F.mse_loss(student_proj, teacher_hidden)
+            # CRITICAL FIX: Use reduction='sum' and normalize by sequence length and hidden dim
+            # to prevent loss explosion with long sequences
+            mse_sum = F.mse_loss(student_proj, teacher_hidden, reduction='sum')
+            batch_size, seq_len, hidden_dim = student_proj.shape
+
+            # Normalize by total number of elements to get mean per element
+            layer_loss = mse_sum / (batch_size * seq_len * hidden_dim)
 
             # Apply adaptive weight
             total_loss += weights[idx] * layer_loss
