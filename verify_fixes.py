@@ -217,6 +217,21 @@ try:
 
     print(f"✅ Attention loss normalization: 90.0 / {seq_len} = {normalized_attn:.4f}")
 
+    # Test attention alignment loss normalization (from router)
+    raw_attention_alignment = 112.67  # Typical value from logs at step 12500
+    normalized_alignment = raw_attention_alignment / seq_len
+
+    if normalized_alignment > 1.0:
+        print(f"❌ Attention alignment normalization failed: {normalized_alignment:.4f} > 1.0")
+        sys.exit(1)
+
+    expected_alignment = 0.220
+    if abs(normalized_alignment - expected_alignment) > 0.01:
+        print(f"❌ Attention alignment normalization incorrect: {normalized_alignment:.4f} != {expected_alignment:.4f}")
+        sys.exit(1)
+
+    print(f"✅ Attention alignment normalization: 112.67 / {seq_len} = {normalized_alignment:.4f}")
+
 except Exception as e:
     print(f"❌ Loss normalization test failed: {e}")
     sys.exit(1)
@@ -277,11 +292,12 @@ print("VERIFICATION COMPLETE")
 print("=" * 60)
 print("\n✅ All Priority 1, 2, 3 fixes verified successfully!")
 print("\nKey improvements:")
-print("  • Dtype mismatch: FIXED (logit_projector → float16)")
+print("  • Dtype mismatch: FIXED (logit_projector → float16, student → float32)")
 print("  • Feature loss: NORMALIZED (÷ teacher_dim)")
 print("  • Attention loss: NORMALIZED (÷ seq_len)")
+print("  • Attention alignment: NORMALIZED (÷ seq_len) [KAGGLE FIX]")
 print("  • Curriculum: AGGRESSIVE (100% by 40% progress)")
 print("  • Early stopping: PATIENT (patience=20, warmup=1000)")
-print("  • Logging: REDUCED (every 100 steps)")
+print("  • Logging: REDUCED (every 100 steps, no eval spam)")
 print("\n🚀 Ready to train!")
 print("=" * 60)

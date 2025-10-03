@@ -513,7 +513,12 @@ class StudentAwareDistillationRouter(nn.Module):
         if hasattr(self, 'attention_transfer') and self.attention_transfer is not None:
             attn_kv = teacher_compressed
             attn_output, _ = self.attention_transfer(student_hidden, attn_kv, attn_kv)
-            attn_alignment = F.mse_loss(attn_output, attn_kv)
+            raw_attn_alignment = F.mse_loss(attn_output, attn_kv)
+
+            # CRITICAL FIX: Normalize by sequence length to prevent astronomical values (38-395)
+            # Without normalization, this loss dominates the total (7-14 at 10% weight)
+            batch_size, seq_len, hidden_dim = student_hidden.shape
+            attn_alignment = raw_attn_alignment / seq_len
 
         if attn_alignment is not None:
             outputs['losses']['attention_alignment_loss'] = attn_alignment

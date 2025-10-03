@@ -680,7 +680,7 @@ class DistillationTrainer:
                         teacher_input_ids=teacher_input_ids,
                         teacher_attention_mask=teacher_attention_mask,
                         labels=labels,
-                        step=self.global_step
+                        step=None  # CRITICAL FIX: Don't log curriculum during evaluation
                     )
             else:
                 outputs = self.model(
@@ -689,7 +689,7 @@ class DistillationTrainer:
                     teacher_input_ids=teacher_input_ids,
                     teacher_attention_mask=teacher_attention_mask,
                     labels=labels,
-                    step=self.global_step
+                    step=None  # CRITICAL FIX: Don't log curriculum during evaluation
                 )
 
             eval_losses.append(outputs['loss'].item())

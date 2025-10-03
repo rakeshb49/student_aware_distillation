@@ -826,7 +826,7 @@ class StudentAwareDistillationFramework(nn.Module):
         curriculum_weights = self._get_curriculum_weights(step)
 
         # PRIORITY 2 FIX: Reduce logging spam - only log every 100 steps
-        if step is not None and (step % 100 == 0 or step < 5):
+        if step is not None and step % 100 == 0:
             progress_pct = (step / self.total_steps) * 100 if self.total_steps > 0 else 0
             print(f"\n[CURRICULUM] Step {step} ({progress_pct:.1f}%): "
                   f"kd={curriculum_weights['kd']:.3f}, "

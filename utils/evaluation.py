@@ -144,6 +144,16 @@ class DistillationEvaluator:
     def compute_perplexity(self, model, dataloader) -> float:
         """Compute perplexity on a dataset"""
         model.eval()
+
+        # CRITICAL FIX: Ensure student model is in float32 for evaluation
+        # During training with AMP, student may have mixed precision weights
+        # Convert back to float32 to avoid dtype mismatch in lm_head
+        if model is self.student_model:
+            original_dtype = next(model.parameters()).dtype
+            if original_dtype != torch.float32:
+                model = model.to(torch.float32)
+                print(f"[Eval] Converted student model from {original_dtype} to float32 for evaluation")
+
         total_loss = 0
         total_tokens = 0
 
@@ -186,6 +196,12 @@ class DistillationEvaluator:
         """Measure how well student retains teacher's knowledge"""
         self.teacher_model.eval()
         self.student_model.eval()
+
+        # CRITICAL FIX: Ensure student model is in float32 for evaluation
+        original_dtype = next(self.student_model.parameters()).dtype
+        if original_dtype != torch.float32:
+            self.student_model = self.student_model.to(torch.float32)
+            print(f"[Eval] Converted student model from {original_dtype} to float32 for knowledge retention")
 
         total_kl_div = 0
         total_top_k_overlap = 0
