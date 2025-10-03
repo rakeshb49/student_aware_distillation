@@ -65,18 +65,28 @@ class TeacherToStudentLogitProjector(nn.Module):
         if teacher_hidden is None and teacher_probs is None:
             raise ValueError("Provide teacher_hidden or teacher_probs")
 
+        projector_dtype = self.hidden_projector.weight.dtype
+
         if teacher_hidden is None:
             # Fallback (slower): compute expected hidden via probs @ embedding
             # Only for backward compatibility with tests
-            teacher_embedding_weight = self.teacher_embedding.weight.to(teacher_probs.dtype)
-            teacher_hidden = torch.matmul(teacher_probs, teacher_embedding_weight)
+            probs = teacher_probs.to(projector_dtype)
+            teacher_embedding_weight = self.teacher_embedding.weight.to(projector_dtype)
+            teacher_hidden = torch.matmul(probs, teacher_embedding_weight)
 
-        # Project teacher hidden to student dimensionality
-        student_hidden = self.hidden_projector(teacher_hidden)
+        def project(hidden_states: torch.Tensor) -> torch.Tensor:
+            hidden_states = hidden_states.to(projector_dtype)
+            student_hidden = self.hidden_projector(hidden_states)
+            student_embedding_weight = self.student_embedding.weight.to(projector_dtype)
+            logits = torch.matmul(student_hidden, student_embedding_weight.t())
+            return logits
 
-        # Convert to student vocabulary logits
-        student_embedding_weight = self.student_embedding.weight.to(student_hidden.dtype)
-        projected_logits = torch.matmul(student_hidden, student_embedding_weight.t())
+        if torch.is_autocast_enabled() and teacher_hidden.device.type == "cuda":
+            with torch.cuda.amp.autocast(enabled=False):
+                projected_logits = project(teacher_hidden)
+        else:
+            projected_logits = project(teacher_hidden)
+
         return projected_logits
 
 
@@ -379,9 +389,8 @@ class StudentAwareDistillationFramework(nn.Module):
             student_dim=self.student_dim
         )
 
-        # PRIORITY 1 FIX: Convert logit_projector to teacher's dtype to avoid dtype mismatch
-        # Teacher is in float16, but projector is initialized in float32
-        self.logit_projector = self.logit_projector.to(self.teacher_model.dtype)
+        # PRECISION FIX: Keep projector parameters in float32 for stable KD when teacher runs in fp16
+        self.logit_projector = self.logit_projector.to(torch.float32)
 
         # Store pad token id (used for masking losses)
         tokenizer = config.get('student_tokenizer')
@@ -838,9 +847,9 @@ class StudentAwareDistillationFramework(nn.Module):
             else:
                 sanitized_attn = self._sanitize_tensor(a.to(torch.float32), f'student_attention_{idx}')
                 student_attention.append(torch.nan_to_num(sanitized_attn, nan=0.0, posinf=0.0, neginf=0.0))
-
-        # Initialize losses dictionary
+        # Initialize losses dictionary and routing placeholder
         losses = {}
+        routing_outputs = {'routing_info': {}}
 
         # FIX ISSUE #8: Get curriculum learning weights
         curriculum_weights = self._get_curriculum_weights(step)
@@ -919,15 +928,16 @@ class StudentAwareDistillationFramework(nn.Module):
 
         # FIX ISSUE #7: Track loss magnitude for adaptive balancing
         self._update_loss_magnitude_ema('kd', kd_loss.item())
+        kd_weight = self._get_balanced_loss_weight('kd', curriculum_weights['kd'])
 
-        # FIX ISSUE #8: Use curriculum weight instead of fixed alpha
-        weighted_kd = kd_loss * curriculum_weights['kd']
+        # FIX ISSUE #8: Use curriculum weight instead of fixed alpha (after balancing)
+        weighted_kd = kd_loss * kd_weight
         losses['kd_loss'] = self._ensure_finite_loss('kd_loss', weighted_kd)
 
         # PRIORITY 2 FIX: Reduce logging spam - only log every 100 steps during training
         if self.training and step is not None and step % 100 == 0:
-            print(f"[KD] Raw: {kd_loss.item():.4f}, Weight: {curriculum_weights['kd']:.3f}, "
-                  f"Weighted: {weighted_kd.item():.4f}")
+            print(f"[KD] Raw: {kd_loss.item():.4f}, BaseWeight: {curriculum_weights['kd']:.3f}, "
+                  f"BalancedWeight: {kd_weight:.3f}, Weighted: {weighted_kd.item():.4f}")
 
         # 2. Student-aware routing and feature losses
         if len(student_hidden) > 0 and len(teacher_hidden) > 0:
@@ -948,11 +958,19 @@ class StudentAwareDistillationFramework(nn.Module):
             # FIX ISSUE #8: Use curriculum weights for routing losses
             for loss_name, loss_value in routing_outputs['losses'].items():
                 if loss_name == 'attention_alignment_loss':
-                    weight = curriculum_weights['attention']
+                    base_weight = curriculum_weights['attention']
+                    magnitude_key = 'attention'
                 else:
-                    weight = curriculum_weights['feature']
+                    base_weight = curriculum_weights['feature']
+                    magnitude_key = 'feature'
 
-                scaled = self._ensure_finite_loss(f'routing_{loss_name}', loss_value * weight)
+                self._update_loss_magnitude_ema(magnitude_key, loss_value.item())
+                balanced_weight = self._get_balanced_loss_weight(magnitude_key, base_weight)
+
+                scaled = self._ensure_finite_loss(
+                    f'routing_{loss_name}',
+                    loss_value * balanced_weight
+                )
                 losses[f'routing_{loss_name}'] = scaled
 
             # PRIORITY 2 FIX: Reduce logging spam - only log every 100 steps during training
@@ -960,11 +978,15 @@ class StudentAwareDistillationFramework(nn.Module):
                 for loss_name, loss_value in routing_outputs['losses'].items():
                     raw_val = loss_value.item()
                     if loss_name == 'attention_alignment_loss':
-                        weight = curriculum_weights['attention']
+                        base_weight = curriculum_weights['attention']
+                        magnitude_key = 'attention'
                     else:
-                        weight = curriculum_weights['feature']
+                        base_weight = curriculum_weights['feature']
+                        magnitude_key = 'feature'
+                    balanced_weight = self._get_balanced_loss_weight(magnitude_key, base_weight)
                     scaled_val = losses[f'routing_{loss_name}'].item()
-                    print(f"[ROUTING] {loss_name}: Raw={raw_val:.4f}, Weight={weight:.3f}, Scaled={scaled_val:.4f}")
+                    print(f"[ROUTING] {loss_name}: Raw={raw_val:.4f}, BaseWeight={base_weight:.3f}, "
+                          f"BalancedWeight={balanced_weight:.3f}, Scaled={scaled_val:.4f}")
 
         # 3. Attention transfer loss
         if student_attention and teacher_attention and self.alpha_attention > 0:
@@ -991,8 +1013,10 @@ class StudentAwareDistillationFramework(nn.Module):
 
             if attn_losses:
                 attn_mean = torch.stack(attn_losses).mean()
+                self._update_loss_magnitude_ema('attention', attn_mean.item())
+                attn_weight = self._get_balanced_loss_weight('attention', curriculum_weights['attention'])
                 # FIX ISSUE #8: Use curriculum weight
-                losses['attention_loss'] = self._ensure_finite_loss('attention_loss', attn_mean * curriculum_weights['attention'])
+                losses['attention_loss'] = self._ensure_finite_loss('attention_loss', attn_mean * attn_weight)
 
         # 4. Layer-wise distillation loss
         # FIX ISSUE #8: Use curriculum weight
@@ -1001,7 +1025,9 @@ class StudentAwareDistillationFramework(nn.Module):
                 list(student_hidden),
                 list(teacher_hidden)
             )
-            losses['layerwise_loss'] = self._ensure_finite_loss('layerwise_loss', layerwise_loss * curriculum_weights['layerwise'])
+            self._update_loss_magnitude_ema('layerwise', layerwise_loss.item())
+            layer_weight = self._get_balanced_loss_weight('layerwise', curriculum_weights['layerwise'])
+            losses['layerwise_loss'] = self._ensure_finite_loss('layerwise_loss', layerwise_loss * layer_weight)
 
         # 5. Contrastive loss (using CLS or mean pooling)
         # FIX ISSUE #8: Use curriculum weight
@@ -1011,18 +1037,21 @@ class StudentAwareDistillationFramework(nn.Module):
             teacher_embed = teacher_hidden[-1].mean(dim=1)
 
             contrastive_loss = self.contrastive_loss(student_embed, teacher_embed)
-            losses['contrastive_loss'] = self._ensure_finite_loss('contrastive_loss', contrastive_loss * curriculum_weights['contrastive'])
+            self._update_loss_magnitude_ema('contrastive', contrastive_loss.item())
+            contrastive_weight = self._get_balanced_loss_weight('contrastive', curriculum_weights['contrastive'])
+            losses['contrastive_loss'] = self._ensure_finite_loss('contrastive_loss', contrastive_loss * contrastive_weight)
 
         # 6. Language modeling loss (if labels provided)
         # PRIORITY 2 FIX: Always compute LM loss if labels are provided and log it
         if labels is not None:
             lm_loss = self._chunked_cross_entropy(student_logits, labels)
-            lm_weight = (1 - self.alpha_kd)
+            self._update_loss_magnitude_ema('lm', lm_loss.item())
+            lm_weight = self._get_balanced_loss_weight('lm', (1 - self.alpha_kd))
             losses['lm_loss'] = self._ensure_finite_loss('lm_loss', lm_loss * lm_weight)
 
             # Log LM loss periodically to ensure it's being tracked
             if self.training and step is not None and step % 100 == 0:
-                print(f"[LM] Raw: {lm_loss.item():.4f}, Weight: {lm_weight:.3f}, "
+                print(f"[LM] Raw: {lm_loss.item():.4f}, BalancedWeight: {lm_weight:.3f}, "
                       f"Weighted: {(lm_loss * lm_weight).item():.4f}")
 
         # Compute total loss
@@ -1038,7 +1067,7 @@ class StudentAwareDistillationFramework(nn.Module):
             'losses': losses,
             'student_logits': student_logits,
             'teacher_logits': teacher_logits,
-            'routing_info': routing_outputs['routing_info'] if 'routing_outputs' in locals() else {}
+            'routing_info': routing_outputs.get('routing_info', {})
         }
 
     def _chunked_cross_entropy(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -1049,6 +1078,9 @@ class StudentAwareDistillationFramework(nn.Module):
         # Shift for causal language modeling (predict next token)
         shift_logits = logits[:, :-1, :].contiguous()
         shift_labels = labels[:, 1:].contiguous()
+
+        # Additional guard: clamp logits to prevent overflow in exp during label smoothing
+        shift_logits = torch.clamp(shift_logits, min=-20.0, max=20.0)
 
         # Mask padding tokens so they do not contribute to loss
         if self.pad_token_id != -100:
