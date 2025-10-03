@@ -390,8 +390,10 @@ class StudentAwareDistillationFramework(nn.Module):
         self.alpha_contrastive = config.get('alpha_contrastive', 0.05)
 
         # FIX ISSUE #10: Temperature for KD with curriculum (start high, reduce gradually)
-        self.base_temperature = config.get('temperature', 3.0)  # Reduced from 4.0 to 3.0
-        self.min_temperature = config.get('min_temperature', 2.0)
+        # CRITICAL FIX: Reduced from 3.0 to 2.0 to prevent numerical instability and gradient explosions
+        # Temperature² factor: 2.0² = 4.0 (vs 3.0² = 9.0 which caused NaN and training instability)
+        self.base_temperature = config.get('temperature', 2.0)  # Reduced from 3.0 to 2.0
+        self.min_temperature = config.get('min_temperature', 1.5)  # Reduced from 2.0 to 1.5
         self.use_temperature_curriculum = config.get('use_temperature_curriculum', True)
 
         # FIX ISSUE #8: Curriculum learning for loss weights

@@ -711,9 +711,15 @@ class DistillationTrainer:
         eval_loss = np.mean(eval_losses)
 
         # FIX ISSUE #2: Calculate perplexity with overflow protection
-        perplexity = np.exp(min(eval_loss, 20.0))  # Cap at exp(20) ≈ 485M
+        # CRITICAL FIX: Show actual perplexity calculation even when capped for better diagnostics
         if eval_loss > 20.0:
-            print(f"[Warning] Loss {eval_loss:.2f} too high for meaningful perplexity (capped at 20)")
+            perplexity = np.exp(20.0)  # Cap at exp(20) ≈ 485M to prevent overflow
+            actual_ppl = np.exp(min(eval_loss, 50.0))  # Calculate up to exp(50) for display
+            print(f"[Warning] Loss {eval_loss:.2f} too high - perplexity would be {actual_ppl:.2e}")
+            print(f"[Warning] Displaying capped perplexity: {perplexity:.2e} (from loss=20.0)")
+            print(f"[Info] Target: Get loss below 10.0 for meaningful perplexity (<22,000)")
+        else:
+            perplexity = np.exp(eval_loss)
 
         metrics = {
             'eval_loss': eval_loss,
