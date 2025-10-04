@@ -407,8 +407,23 @@ class StudentAwareDistillationFramework(nn.Module):
         # FIX ISSUE #10: Temperature for KD with curriculum (start high, reduce gradually)
         # CRITICAL FIX: Reduced from 3.0 to 2.0 to prevent numerical instability and gradient explosions
         # Temperature² factor: 2.0² = 4.0 (vs 3.0² = 9.0 which caused NaN and training instability)
-        self.base_temperature = config.get('temperature', 2.0)  # Reduced from 3.0 to 2.0
-        self.min_temperature = config.get('min_temperature', 1.5)  # Reduced from 2.0 to 1.5
+        requested_temperature = config.get('temperature', 2.0)
+        if requested_temperature > 2.0:
+            print(
+                f"[Warning] Requested KD temperature {requested_temperature:.2f} is too high for stable training; "
+                "clamping to 2.0 to prevent KD dominance."
+            )
+        self.base_temperature = min(requested_temperature, 2.0)
+
+        requested_min_temperature = config.get('min_temperature', 1.5)
+        if requested_min_temperature >= self.base_temperature:
+            adjusted_min = max(1.0, self.base_temperature - 0.3)
+            print(
+                f"[Info] Adjusting min_temperature from {requested_min_temperature:.2f} to {adjusted_min:.2f} "
+                "to keep it below the base temperature."
+            )
+            requested_min_temperature = adjusted_min
+        self.min_temperature = max(1.0, requested_min_temperature)
         self.use_temperature_curriculum = config.get('use_temperature_curriculum', True)
 
         # FIX ISSUE #8: Curriculum learning for loss weights

@@ -86,7 +86,8 @@ def load_config(config_path: str = None) -> dict:
         'alpha_contrastive': 0.05,
 
         # Distillation settings
-        'temperature': 4.0,
+    'temperature': 2.0,
+    'min_temperature': 1.5,
         'contrastive_temp': 0.07,
 
         # Router configuration
@@ -216,6 +217,8 @@ def main(args):
     # Create data loaders
     print("\nPreparing datasets...")
     dataset_names = args.datasets if args.datasets else get_recommended_datasets()
+
+    report_path = None
 
     try:
         train_dataloader = create_distillation_dataloader(
@@ -385,7 +388,7 @@ def main(args):
         print("TRAINING COMPLETED SUCCESSFULLY!")
         print("="*60)
         print(f"Final model saved to: {final_path}")
-        if not args.skip_eval:
+        if report_path is not None:
             print(f"Evaluation report saved to: {report_path}")
         print(f"Training logs saved to: {config['log_dir']}")
 
