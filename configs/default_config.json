@@ -14,7 +14,7 @@
   "save_epochs": 1,
   "max_length": 512,
   
-  "alpha_kd": 0.5,
+  "alpha_kd": 0.3,
   "alpha_feature": 0.1,
   "alpha_attention": 0.1,
   "alpha_layerwise": 0.05,
@@ -41,6 +41,7 @@
   "adaptive_balance_min_multiplier": 0.15,
   "adaptive_balance_max_multiplier": 2.0,
   "adaptive_balance_epsilon": 0.0001,
+  "adaptive_reference_loss": "lm",
   
   "dataset_subset_size": 50000,
   "num_workers": 2,

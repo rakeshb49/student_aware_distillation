@@ -19,7 +19,7 @@
   "max_length": 384,
 
   "_comment_loss_weights": "Loss component weights - FIX ISSUE #7: Balanced weights",
-  "alpha_kd": 0.5,
+  "alpha_kd": 0.3,
   "alpha_feature": 0.1,
   "alpha_attention": 0.1,
   "alpha_layerwise": 0.05,
@@ -54,6 +54,7 @@
   "adaptive_balance_min_multiplier": 0.15,
   "adaptive_balance_max_multiplier": 2.0,
   "adaptive_balance_epsilon": 0.0001,
+  "adaptive_reference_loss": "lm",
 
   "_comment_memory": "Memory optimization - FIX ISSUE #6, #11, #13",
   "kd_top_k": 256,

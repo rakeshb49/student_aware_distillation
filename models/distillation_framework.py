@@ -444,6 +444,7 @@ class StudentAwareDistillationFramework(nn.Module):
             config.get('adaptive_balance_max_multiplier', 2.0)
         )
         self.adaptive_balance_epsilon = config.get('adaptive_balance_epsilon', 1e-4)
+        self.adaptive_reference_loss = config.get('adaptive_reference_loss', 'lm')
 
     def _sanitize_tensor(self, tensor: Optional[torch.Tensor], name: str,
                           clamp_range: Optional[Tuple[float, float]] = None) -> Optional[torch.Tensor]:
@@ -623,11 +624,19 @@ class StudentAwareDistillationFramework(nn.Module):
         if not magnitudes:
             return base_weight
 
-        active_magnitudes = [m for m in magnitudes if m > self.adaptive_balance_epsilon]
-        if active_magnitudes:
-            reference_magnitude = sum(active_magnitudes) / len(active_magnitudes)
-        else:
-            reference_magnitude = sum(magnitudes) / len(magnitudes)
+        reference_magnitude = None
+        if self.adaptive_reference_loss:
+            ref_value = self.loss_magnitude_ema.get(self.adaptive_reference_loss)
+            if ref_value is not None and math.isfinite(ref_value) and ref_value > self.adaptive_balance_epsilon:
+                reference_magnitude = max(ref_value, 1e-6)
+
+        if reference_magnitude is None:
+            active_magnitudes = [m for m in magnitudes if m > self.adaptive_balance_epsilon]
+            if active_magnitudes:
+                reference_magnitude = sum(active_magnitudes) / len(active_magnitudes)
+            else:
+                reference_magnitude = sum(magnitudes) / len(magnitudes)
+
         if reference_magnitude < 1e-6:
             return base_weight
 
