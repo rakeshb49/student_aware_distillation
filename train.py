@@ -79,7 +79,7 @@ def load_config(config_path: str = None) -> dict:
         'max_length': 512,
 
         # Loss weights
-        'alpha_kd': 0.7,
+    'alpha_kd': 0.55,
         'alpha_feature': 0.1,
         'alpha_attention': 0.1,
         'alpha_layerwise': 0.05,
@@ -102,12 +102,13 @@ def load_config(config_path: str = None) -> dict:
         'scheduler_type': 'cosine',
         'use_amp': True,
         'amp_dtype': 'bfloat16',
-        'loss_chunk_size': 128,
-        'attention_layers': 4,
-        'use_adaptive_loss_balancing': True,
-        'adaptive_balance_strength': 0.5,
-        'adaptive_balance_min_multiplier': 0.25,
-        'adaptive_balance_max_multiplier': 2.0,
+    'loss_chunk_size': 128,
+    'attention_layers': 4,
+    'use_adaptive_loss_balancing': True,
+    'adaptive_balance_strength': 1.0,
+    'adaptive_balance_min_multiplier': 0.15,
+    'adaptive_balance_max_multiplier': 3.0,
+    'adaptive_balance_epsilon': 1e-4,
 
         # Data configuration
         'dataset_subset_size': 50000,  # Limit dataset size for Kaggle

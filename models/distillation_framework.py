@@ -437,12 +437,13 @@ class StudentAwareDistillationFramework(nn.Module):
         self.loss_magnitude_ema = {}
         self.magnitude_momentum = 0.9
         self.use_adaptive_loss_balancing = config.get('use_adaptive_loss_balancing', True)
-        self.adaptive_balance_strength = config.get('adaptive_balance_strength', 0.5)
-        self.adaptive_balance_min_multiplier = max(0.05, config.get('adaptive_balance_min_multiplier', 0.25))
+        self.adaptive_balance_strength = config.get('adaptive_balance_strength', 1.0)
+        self.adaptive_balance_min_multiplier = max(0.05, config.get('adaptive_balance_min_multiplier', 0.15))
         self.adaptive_balance_max_multiplier = max(
             self.adaptive_balance_min_multiplier,
-            config.get('adaptive_balance_max_multiplier', 2.0)
+            config.get('adaptive_balance_max_multiplier', 3.0)
         )
+        self.adaptive_balance_epsilon = config.get('adaptive_balance_epsilon', 1e-4)
 
     def _sanitize_tensor(self, tensor: Optional[torch.Tensor], name: str,
                           clamp_range: Optional[Tuple[float, float]] = None) -> Optional[torch.Tensor]:
@@ -622,7 +623,11 @@ class StudentAwareDistillationFramework(nn.Module):
         if not magnitudes:
             return base_weight
 
-        reference_magnitude = sum(magnitudes) / len(magnitudes)
+        active_magnitudes = [m for m in magnitudes if m > self.adaptive_balance_epsilon]
+        if active_magnitudes:
+            reference_magnitude = sum(active_magnitudes) / len(active_magnitudes)
+        else:
+            reference_magnitude = sum(magnitudes) / len(magnitudes)
         if reference_magnitude < 1e-6:
             return base_weight
 
