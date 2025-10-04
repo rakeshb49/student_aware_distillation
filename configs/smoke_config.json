@@ -39,7 +39,10 @@
   "amp_dtype": "bfloat16",
   "loss_chunk_size": 128,
   "attention_layers": 2,
-  "use_adaptive_loss_balancing": false,
+  "use_adaptive_loss_balancing": true,
+  "adaptive_balance_strength": 0.5,
+  "adaptive_balance_min_multiplier": 0.25,
+  "adaptive_balance_max_multiplier": 2.0,
 
   "kd_top_k": 256,
   "use_gradient_checkpointing": true,

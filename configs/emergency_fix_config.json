@@ -54,6 +54,10 @@
 
   "_CRITICAL_FIX_6": "Reduced attention layers for memory efficiency",
   "attention_layers": 1,
+  "use_adaptive_loss_balancing": true,
+  "adaptive_balance_strength": 0.5,
+  "adaptive_balance_min_multiplier": 0.25,
+  "adaptive_balance_max_multiplier": 2.0,
 
   "_CRITICAL_FIX_7": "Memory optimization settings",
   "use_gradient_checkpointing": true,

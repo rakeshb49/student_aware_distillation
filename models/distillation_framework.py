@@ -436,7 +436,13 @@ class StudentAwareDistillationFramework(nn.Module):
         # FIX ISSUE #7: Track loss magnitudes for adaptive balancing
         self.loss_magnitude_ema = {}
         self.magnitude_momentum = 0.9
-        self.use_adaptive_loss_balancing = config.get('use_adaptive_loss_balancing', False)
+        self.use_adaptive_loss_balancing = config.get('use_adaptive_loss_balancing', True)
+        self.adaptive_balance_strength = config.get('adaptive_balance_strength', 0.5)
+        self.adaptive_balance_min_multiplier = max(0.05, config.get('adaptive_balance_min_multiplier', 0.25))
+        self.adaptive_balance_max_multiplier = max(
+            self.adaptive_balance_min_multiplier,
+            config.get('adaptive_balance_max_multiplier', 2.0)
+        )
 
     def _sanitize_tensor(self, tensor: Optional[torch.Tensor], name: str,
                           clamp_range: Optional[Tuple[float, float]] = None) -> Optional[torch.Tensor]:
@@ -612,18 +618,32 @@ class StudentAwareDistillationFramework(nn.Module):
         if not self.loss_magnitude_ema or loss_name not in self.loss_magnitude_ema:
             return base_weight
 
-        # Get max magnitude for normalization
-        max_magnitude = max(self.loss_magnitude_ema.values())
-        current_magnitude = self.loss_magnitude_ema[loss_name]
-
-        if current_magnitude < 1e-6:
+        magnitudes = [max(v, 1e-6) for v in self.loss_magnitude_ema.values() if math.isfinite(v)]
+        if not magnitudes:
             return base_weight
 
-        # Scale weight inversely with magnitude
-        balanced_weight = base_weight * (max_magnitude / current_magnitude)
+        reference_magnitude = sum(magnitudes) / len(magnitudes)
+        if reference_magnitude < 1e-6:
+            return base_weight
 
-        # Clamp to reasonable range (0.1x to 10x original weight)
-        balanced_weight = max(base_weight * 0.1, min(base_weight, balanced_weight))
+        current_magnitude = max(self.loss_magnitude_ema.get(loss_name, reference_magnitude), 1e-6)
+        ratio = reference_magnitude / current_magnitude
+
+        # Smooth the adjustment so weights change gradually
+        scale = ratio ** self.adaptive_balance_strength
+
+        balanced_weight = base_weight * scale
+
+        min_weight = base_weight * self.adaptive_balance_min_multiplier
+        max_weight = base_weight * self.adaptive_balance_max_multiplier
+
+        if min_weight > max_weight:
+            min_weight, max_weight = max_weight, min_weight
+
+        balanced_weight = max(min_weight, min(max_weight, balanced_weight))
+
+        if not math.isfinite(balanced_weight):
+            return base_weight
 
         return balanced_weight
 
@@ -1106,6 +1126,10 @@ class StudentAwareDistillationFramework(nn.Module):
         if self.pad_token_id != -100:
             shift_labels = shift_labels.masked_fill(shift_labels == self.pad_token_id, -100)
 
+        # If the entire sequence is padding, skip cross-entropy to avoid NaNs from empty reductions
+        if torch.count_nonzero(shift_labels != -100).item() == 0:
+            return shift_logits.new_zeros(())
+
         vocab_size = shift_logits.size(-1)
         flat_logits = shift_logits.view(-1, vocab_size)
         flat_labels = shift_labels.view(-1)
@@ -1142,7 +1166,10 @@ class StudentAwareDistillationFramework(nn.Module):
                 total_loss = total_loss + loss_chunk
                 total_weight = total_weight + mask.sum()
 
-        return total_loss / torch.clamp(total_weight, min=1.0)
+        if total_weight.item() < 1:
+            return logits.new_zeros(())
+
+        return total_loss / total_weight
 
     def save_student(self, save_path: str):
         """Save the distilled student model"""

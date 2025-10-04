@@ -104,7 +104,10 @@ def load_config(config_path: str = None) -> dict:
         'amp_dtype': 'bfloat16',
         'loss_chunk_size': 128,
         'attention_layers': 4,
-    'use_adaptive_loss_balancing': False,
+        'use_adaptive_loss_balancing': True,
+        'adaptive_balance_strength': 0.5,
+        'adaptive_balance_min_multiplier': 0.25,
+        'adaptive_balance_max_multiplier': 2.0,
 
         # Data configuration
         'dataset_subset_size': 50000,  # Limit dataset size for Kaggle
