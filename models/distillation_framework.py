@@ -421,6 +421,7 @@ class StudentAwareDistillationFramework(nn.Module):
         # FIX ISSUE #7: Track loss magnitudes for adaptive balancing
         self.loss_magnitude_ema = {}
         self.magnitude_momentum = 0.9
+        self.use_adaptive_loss_balancing = config.get('use_adaptive_loss_balancing', False)
 
     def _sanitize_tensor(self, tensor: Optional[torch.Tensor], name: str,
                           clamp_range: Optional[Tuple[float, float]] = None) -> Optional[torch.Tensor]:
@@ -575,6 +576,8 @@ class StudentAwareDistillationFramework(nn.Module):
 
     def _update_loss_magnitude_ema(self, loss_name: str, loss_value: float):
         """FIX ISSUE #7: Track EMA of loss magnitudes for adaptive balancing"""
+        if not self.use_adaptive_loss_balancing:
+            return
         if loss_name not in self.loss_magnitude_ema:
             self.loss_magnitude_ema[loss_name] = loss_value
         else:
@@ -589,6 +592,8 @@ class StudentAwareDistillationFramework(nn.Module):
         Normalizes loss contributions so each component has similar impact
         regardless of absolute magnitude.
         """
+        if not self.use_adaptive_loss_balancing:
+            return base_weight
         if not self.loss_magnitude_ema or loss_name not in self.loss_magnitude_ema:
             return base_weight
 
@@ -603,7 +608,7 @@ class StudentAwareDistillationFramework(nn.Module):
         balanced_weight = base_weight * (max_magnitude / current_magnitude)
 
         # Clamp to reasonable range (0.1x to 10x original weight)
-        balanced_weight = max(base_weight * 0.1, min(base_weight * 10.0, balanced_weight))
+        balanced_weight = max(base_weight * 0.1, min(base_weight, balanced_weight))
 
         return balanced_weight
 
