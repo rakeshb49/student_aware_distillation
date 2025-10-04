@@ -441,7 +441,7 @@ class StudentAwareDistillationFramework(nn.Module):
         self.adaptive_balance_min_multiplier = max(0.05, config.get('adaptive_balance_min_multiplier', 0.15))
         self.adaptive_balance_max_multiplier = max(
             self.adaptive_balance_min_multiplier,
-            config.get('adaptive_balance_max_multiplier', 3.0)
+            config.get('adaptive_balance_max_multiplier', 2.0)
         )
         self.adaptive_balance_epsilon = config.get('adaptive_balance_epsilon', 1e-4)
 
@@ -895,6 +895,7 @@ class StudentAwareDistillationFramework(nn.Module):
         # Initialize losses dictionary and routing placeholder
         losses = {}
         routing_outputs = {'routing_info': {}}
+        weight_debug = []
 
         # FIX ISSUE #8: Get curriculum learning weights
         curriculum_weights = self._get_curriculum_weights(step)
@@ -974,6 +975,7 @@ class StudentAwareDistillationFramework(nn.Module):
         # FIX ISSUE #7: Track loss magnitude for adaptive balancing
         self._update_loss_magnitude_ema('kd', kd_loss.item())
         kd_weight = self._get_balanced_loss_weight('kd', curriculum_weights['kd'])
+        weight_debug.append(('kd', curriculum_weights['kd'], kd_weight))
 
         # FIX ISSUE #8: Use curriculum weight instead of fixed alpha (after balancing)
         weighted_kd = kd_loss * kd_weight
@@ -1011,6 +1013,7 @@ class StudentAwareDistillationFramework(nn.Module):
 
                 self._update_loss_magnitude_ema(magnitude_key, loss_value.item())
                 balanced_weight = self._get_balanced_loss_weight(magnitude_key, base_weight)
+                weight_debug.append((loss_name, base_weight, balanced_weight))
 
                 scaled = self._ensure_finite_loss(
                     f'routing_{loss_name}',
@@ -1062,6 +1065,7 @@ class StudentAwareDistillationFramework(nn.Module):
                 attn_weight = self._get_balanced_loss_weight('attention', curriculum_weights['attention'])
                 # FIX ISSUE #8: Use curriculum weight
                 losses['attention_loss'] = self._ensure_finite_loss('attention_loss', attn_mean * attn_weight)
+                weight_debug.append(('attention', curriculum_weights['attention'], attn_weight))
 
         # 4. Layer-wise distillation loss
         # FIX ISSUE #8: Use curriculum weight
@@ -1073,6 +1077,7 @@ class StudentAwareDistillationFramework(nn.Module):
             self._update_loss_magnitude_ema('layerwise', layerwise_loss.item())
             layer_weight = self._get_balanced_loss_weight('layerwise', curriculum_weights['layerwise'])
             losses['layerwise_loss'] = self._ensure_finite_loss('layerwise_loss', layerwise_loss * layer_weight)
+            weight_debug.append(('layerwise', curriculum_weights['layerwise'], layer_weight))
 
         # 5. Contrastive loss (using CLS or mean pooling)
         # FIX ISSUE #8: Use curriculum weight
@@ -1085,6 +1090,7 @@ class StudentAwareDistillationFramework(nn.Module):
             self._update_loss_magnitude_ema('contrastive', contrastive_loss.item())
             contrastive_weight = self._get_balanced_loss_weight('contrastive', curriculum_weights['contrastive'])
             losses['contrastive_loss'] = self._ensure_finite_loss('contrastive_loss', contrastive_loss * contrastive_weight)
+            weight_debug.append(('contrastive', curriculum_weights['contrastive'], contrastive_weight))
 
         # 6. Language modeling loss (if labels provided)
         # PRIORITY 2 FIX: Always compute LM loss if labels are provided and log it
@@ -1093,6 +1099,7 @@ class StudentAwareDistillationFramework(nn.Module):
             self._update_loss_magnitude_ema('lm', lm_loss.item())
             lm_weight = self._get_balanced_loss_weight('lm', (1 - self.alpha_kd))
             losses['lm_loss'] = self._ensure_finite_loss('lm_loss', lm_loss * lm_weight)
+            weight_debug.append(('lm', (1 - self.alpha_kd), lm_weight))
 
             # Log LM loss periodically to ensure it's being tracked
             if self.training and step is not None and step % 100 == 0:
@@ -1106,6 +1113,13 @@ class StudentAwareDistillationFramework(nn.Module):
         # Log total loss summary periodically
         if self.training and step is not None and step % 100 == 0:
             print(f"[TOTAL] Loss: {total_loss.item():.4f}, Components: {len(losses)}")
+            if weight_debug:
+                total_balanced = sum(bal for _, _, bal in weight_debug)
+                weight_summary = ", ".join(
+                    f"{name}:{balanced:.3f} (base {base:.3f})"
+                    for name, base, balanced in weight_debug
+                )
+                print(f"[WEIGHTS] Sum={total_balanced:.3f} :: {weight_summary}")
 
         return {
             'loss': total_loss,
